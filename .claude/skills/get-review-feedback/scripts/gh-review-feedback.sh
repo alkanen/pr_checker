@@ -12,7 +12,7 @@
 #     ./gh-review-feedback myorganisation myrepo 1337 | jq length
 
 #gh api graphql -f owner="$1" -f repo="$2" -F pr="$3" -f query='
-gh api graphql -f owner="edgeware" -f repo="demos-and-pocs" -F pr="$1" -f query='
+gh api graphql -f owner="alkanen" -f repo="pr_checker" -F pr="$1" -f query='
   query FetchReviewComments($owner: String!, $repo: String!, $pr: Int!) {
     repository(owner: $owner, name: $repo) {
       pullRequest(number: $pr) {
