@@ -2,6 +2,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Literal
 
 
 class JobStatus(str, Enum):
@@ -16,6 +17,34 @@ class ReviewTrigger(str, Enum):
     UPDATED = "updated"
     REVIEW_REQUESTED = "review_requested"
     ON_DEMAND = "on_demand"
+
+
+@dataclass
+class DiffLine:
+    kind: Literal["+", "-", " "]
+    content: str
+    old_lineno: int | None
+    new_lineno: int | None
+
+
+@dataclass
+class DiffHunk:
+    file_path: str
+    header: str
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    lines: list[DiffLine]
+
+
+@dataclass
+class LinkedIssue:
+    number: int
+    title: str
+    body: str
+    labels: list[str]
+    assignees: list[str]
 
 
 @dataclass
