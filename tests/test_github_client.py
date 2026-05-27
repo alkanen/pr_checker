@@ -155,6 +155,27 @@ async def test_get_file_content_custom_threshold(
     assert result is None
 
 
+# --- get_default_branch ---
+
+
+async def test_get_default_branch(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo",
+        json={"id": 1, "name": "repo", "default_branch": "main"},
+    )
+    branch = await github.get_default_branch("owner/repo")
+    assert branch == "main"
+
+
+async def test_get_default_branch_non_main(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo",
+        json={"id": 1, "name": "repo", "default_branch": "develop"},
+    )
+    branch = await github.get_default_branch("owner/repo")
+    assert branch == "develop"
+
+
 # --- get_issue ---
 
 

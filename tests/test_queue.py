@@ -9,6 +9,7 @@ from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import JobStatus, PRJob, ReviewTrigger
 from pr_checker.queue import ReviewQueue
+from pr_checker.reviewer_config import ConfigManager
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def mock_github() -> AsyncMock:
 async def queue(
     persistence: PersistenceLayer, mock_github: AsyncMock
 ) -> AsyncGenerator[ReviewQueue, None]:
-    q = ReviewQueue(persistence, cast(GitHubClient, mock_github))
+    q = ReviewQueue(persistence, cast(GitHubClient, mock_github), ConfigManager())
     await q.start()
     yield q
     await q.stop()

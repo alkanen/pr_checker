@@ -8,3 +8,4 @@ class ServerConfig(BaseSettings):
     port: int = 8000
     root_path: str = ""
     forwarded_allow_ips: str = "127.0.0.1"
+    config_file: str | None = None

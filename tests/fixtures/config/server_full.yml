@@ -1,0 +1,21 @@
+models:
+  default: "gpt-4o-mini"
+  tasks:
+    code_review: "gpt-4o-mini"
+    synthesis: "gpt-4o-mini"
+vram_budget_gb: 16.0
+embedding:
+  model: "text-embedding-3-small"
+qdrant:
+  url: "http://localhost:6333"
+checks:
+  code_quality: true
+  security: true
+  test_coverage: true
+  issue_conformance: true
+  ignore_patterns:
+    - "tests/**"
+output:
+  inline_comments: true
+  summary_comment: true
+  formal_review: true
