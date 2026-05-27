@@ -46,6 +46,7 @@ class OutputConfig(BaseModel):
 class ReviewerConfig(BaseModel):
     models: ModelConfig = Field(default_factory=ModelConfig)
     vram_budget_gb: float = 16.0
+    bytes_per_param: float = Field(default=2.0, gt=0)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     checks: ChecksConfig = Field(default_factory=ChecksConfig)
@@ -81,6 +82,9 @@ def _enforce_limits(merged: ReviewerConfig, server: ReviewerConfig) -> ReviewerC
             "checks": ChecksConfig(**checks_data),
             "output": OutputConfig(**output_data),
             "vram_budget_gb": min(merged.vram_budget_gb, server.vram_budget_gb),
+            # Repos cannot reduce bytes_per_param below the server floor: a lower
+            # value underestimates VRAM and can cause the server to overcommit GPU memory.
+            "bytes_per_param": max(merged.bytes_per_param, server.bytes_per_param),
             # Infrastructure settings are always server-controlled; repos cannot
             # redirect the Qdrant endpoint or swap the embedding model.
             "qdrant": server.qdrant,
