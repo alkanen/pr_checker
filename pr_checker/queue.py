@@ -7,6 +7,8 @@ from typing import Any
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import JobStatus, PRJob
+from pr_checker.reviewer_config import ConfigManager
+from pr_checker.standards_detector import StandardsDetector
 
 _PLACEHOLDER_COMMENT = """\
 ## PR Checker
@@ -19,9 +21,16 @@ _PLACEHOLDER_COMMENT = """\
 
 
 class ReviewQueue:
-    def __init__(self, persistence: PersistenceLayer, github: GitHubClient) -> None:
+    def __init__(
+        self,
+        persistence: PersistenceLayer,
+        github: GitHubClient,
+        config_manager: ConfigManager,
+    ) -> None:
         self._persistence = persistence
         self._github = github
+        self._config_manager = config_manager
+        self._standards_detector = StandardsDetector(github)
         self._queue: asyncio.Queue[PRJob] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
 

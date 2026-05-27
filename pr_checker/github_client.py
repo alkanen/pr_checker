@@ -167,6 +167,12 @@ class GitHubClient:
             return base64.b64decode(content).decode("utf-8", errors="replace")
         return str(content)
 
+    async def get_default_branch(self, repo_full_name: str) -> str:
+        r = await self._client().get(f"/repos/{repo_full_name}")
+        r.raise_for_status()
+        data: dict[str, Any] = r.json()
+        return str(data["default_branch"])
+
     async def get_issue(self, repo_full_name: str, issue_number: int) -> LinkedIssue:
         r = await self._client().get(f"/repos/{repo_full_name}/issues/{issue_number}")
         r.raise_for_status()

@@ -2,7 +2,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 
 class JobStatus(str, Enum):
@@ -45,6 +45,14 @@ class LinkedIssue:
     body: str
     labels: list[str]
     assignees: list[str]
+
+
+@dataclass
+class ProjectStandards:
+    ruff: dict[str, Any] = field(default_factory=dict)
+    mypy: dict[str, Any] = field(default_factory=dict)
+    eslint: dict[str, Any] = field(default_factory=dict)
+    prettier: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

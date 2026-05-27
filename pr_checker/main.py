@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -10,6 +11,7 @@ from pr_checker.config import ServerConfig
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.queue import ReviewQueue
+from pr_checker.reviewer_config import ConfigManager
 from pr_checker.webhook import parse_pr_event, validate_signature
 
 
@@ -18,7 +20,8 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     persistence = PersistenceLayer(cfg.database_url)
     github = GitHubClient(cfg.github_token)
-    queue = ReviewQueue(persistence, github)
+    config_manager = ConfigManager(Path(cfg.config_file) if cfg.config_file else None)
+    queue = ReviewQueue(persistence, github, config_manager)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
