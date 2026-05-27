@@ -9,3 +9,5 @@ class ServerConfig(BaseSettings):
     root_path: str = ""
     forwarded_allow_ips: str = "127.0.0.1"
     config_file: str | None = None
+    lm_studio_url: str = ""
+    lm_studio_api_key: str = ""

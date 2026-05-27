@@ -41,9 +41,11 @@ Start the dev server:
 |---|---|
 | `GITHUB_WEBHOOK_SECRET` | Validates incoming webhook payloads |
 | `GITHUB_TOKEN` | Personal access token for GitHub API calls |
-| `OPENAI_API_KEY` | API key for the LLM provider |
+| `OPENAI_API_KEY` | API key for the LLM provider (inference/completions) |
 | `OPENAI_BASE_URL` | Override to point at LM Studio (`http://localhost:1234/v1`) or Anthropic proxy |
 | `LLM_MODEL` | Model name to use (e.g. `claude-sonnet-4-6`, `llama-3.3-70b-instruct`) |
+| `LM_STUDIO_URL` | Base URL for the LM Studio **model-management** API (e.g. `http://localhost:1234/api/v1`); must include `/api/v1` — distinct from `OPENAI_BASE_URL` which ends in `/v1` |
+| `LM_STUDIO_API_KEY` | Bearer token for the LM Studio management API (same key as `OPENAI_API_KEY` on most setups) |
 
 ## Code Conventions
 

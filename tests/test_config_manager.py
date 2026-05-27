@@ -224,6 +224,28 @@ async def test_repo_cannot_enable_server_disabled_output(
     assert result.output.formal_review is False
 
 
+async def test_repo_cannot_lower_bytes_per_param(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    manager = ConfigManager(config_file=FIXTURES / "server_full.yml")
+    _mock_repo(httpx_mock)
+    _mock_config(httpx_mock, "bytes_per_param: 0.5\n")
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.bytes_per_param == 2.0
+
+
+async def test_repo_can_raise_bytes_per_param(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    manager = ConfigManager(config_file=FIXTURES / "server_full.yml")
+    _mock_repo(httpx_mock)
+    _mock_config(httpx_mock, "bytes_per_param: 4.0\n")
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.bytes_per_param == 4.0
+
+
 async def test_repo_cannot_override_infrastructure_settings(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
