@@ -185,6 +185,28 @@ class GitHubClient:
             assignees=[a["login"] for a in data.get("assignees", [])],
         )
 
+    async def submit_pr_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        commit_sha: str,
+        body: str,
+        event: str,
+        comments: list[dict[str, Any]] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "commit_id": commit_sha,
+            "body": body,
+            "event": event,
+        }
+        if comments:
+            payload["comments"] = comments
+        r = await self._client().post(
+            f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
+            json=payload,
+        )
+        r.raise_for_status()
+
     async def aclose(self) -> None:
         if self._http is not None:
             await self._http.aclose()

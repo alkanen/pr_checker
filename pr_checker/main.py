@@ -6,12 +6,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
+from openai import AsyncOpenAI
 
 from pr_checker.config import ServerConfig
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
+from pr_checker.issue_resolver import IssueResolver
 from pr_checker.queue import ReviewQueue
+from pr_checker.review_orchestrator import ReviewOrchestrator
 from pr_checker.reviewer_config import ConfigManager
+from pr_checker.standards_detector import StandardsDetector
 from pr_checker.webhook import parse_pr_event, validate_signature
 
 
@@ -21,7 +25,32 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     persistence = PersistenceLayer(cfg.database_url)
     github = GitHubClient(cfg.github_token)
     config_manager = ConfigManager(Path(cfg.config_file) if cfg.config_file else None)
-    queue = ReviewQueue(persistence, github, config_manager)
+    standards_detector = StandardsDetector(github)
+
+    openai_client = AsyncOpenAI(
+        api_key=cfg.openai_api_key or "sk-placeholder",
+        base_url=cfg.openai_base_url or None,
+    )
+    issue_resolver = IssueResolver(github, llm=openai_client)
+
+    lm_studio = None
+    model_manager = None
+    if cfg.lm_studio_url:
+        from pr_checker.lm_studio_client import LMStudioClient
+        from pr_checker.model_manager import ModelManager
+
+        lm_studio = LMStudioClient(cfg.lm_studio_url, cfg.lm_studio_api_key)
+        model_manager = ModelManager(lm_studio)
+
+    orchestrator = ReviewOrchestrator(
+        github=github,
+        config_manager=config_manager,
+        standards_detector=standards_detector,
+        issue_resolver=issue_resolver,
+        model_manager=model_manager,
+        openai=openai_client,
+    )
+    queue = ReviewQueue(persistence, github, orchestrator)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
@@ -34,6 +63,9 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         yield
         await queue.stop()
         await github.aclose()
+        await openai_client.close()
+        if lm_studio is not None:
+            await lm_studio.aclose()
         await persistence.dispose()
 
     application = FastAPI(title="pr-checker", lifespan=lifespan)

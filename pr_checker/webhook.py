@@ -38,6 +38,7 @@ def parse_pr_event(payload: dict[str, Any]) -> PRJob | None:
             repo_full_name=repo["full_name"],
             pr_number=pr["number"],
             pr_title=pr["title"],
+            pr_body=pr.get("body") or "",
             head_sha=pr["head"]["sha"],
             base_sha=pr["base"]["sha"],
             head_branch=pr["head"]["ref"],

@@ -7,17 +7,7 @@ from typing import Any
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import JobStatus, PRJob
-from pr_checker.reviewer_config import ConfigManager
-from pr_checker.standards_detector import StandardsDetector
-
-_PLACEHOLDER_COMMENT = """\
-## PR Checker
-
-> This is a placeholder review. The full LLM-powered review will be available soon.
-
----
-*Posted by pr-checker*
-"""
+from pr_checker.review_orchestrator import ReviewOrchestrator
 
 
 class ReviewQueue:
@@ -25,12 +15,11 @@ class ReviewQueue:
         self,
         persistence: PersistenceLayer,
         github: GitHubClient,
-        config_manager: ConfigManager,
+        orchestrator: ReviewOrchestrator,
     ) -> None:
         self._persistence = persistence
         self._github = github
-        self._config_manager = config_manager
-        self._standards_detector = StandardsDetector(github)
+        self._orchestrator = orchestrator
         self._queue: asyncio.Queue[PRJob] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
 
@@ -77,9 +66,7 @@ class ReviewQueue:
             await self._github.post_commit_status(
                 job.repo_full_name, job.head_sha, "pending", "PR review in progress"
             )
-            await self._github.post_pr_comment(
-                job.repo_full_name, job.pr_number, _PLACEHOLDER_COMMENT
-            )
+            await self._orchestrator.run(job)
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
             await self._persistence.update_job(job)

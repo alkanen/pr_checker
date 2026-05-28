@@ -47,12 +47,45 @@ class LinkedIssue:
     assignees: list[str]
 
 
+class Severity(str, Enum):
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+@dataclass
+class Finding:
+    severity: Severity
+    confidence: float  # [0.0, 1.0]
+    category: str
+    message: str
+    suggestion: str | None = None
+    file_path: str | None = None
+    line_number: int | None = None  # new-file line number (right side)
+
+
+@dataclass
+class ReviewResult:
+    findings: list[Finding]
+    verdict: Literal["approve", "request_changes", "comment"]
+    summary: str
+
+
 @dataclass
 class ProjectStandards:
     ruff: dict[str, Any] = field(default_factory=dict)
     mypy: dict[str, Any] = field(default_factory=dict)
     eslint: dict[str, Any] = field(default_factory=dict)
     prettier: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ReviewContext:
+    hunks: list[DiffHunk]
+    standards: ProjectStandards
+    linked_issues: list[LinkedIssue]
 
 
 @dataclass
@@ -65,6 +98,7 @@ class PRJob:
     head_branch: str
     base_branch: str
     trigger: ReviewTrigger
+    pr_body: str = ""
     status: JobStatus = JobStatus.PENDING
     job_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

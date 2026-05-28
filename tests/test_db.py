@@ -87,6 +87,24 @@ async def test_update_to_failed(persistence: PersistenceLayer) -> None:
     assert fetched.error_message == "GitHub API timeout"
 
 
+async def test_pr_body_persisted_and_restored(persistence: PersistenceLayer) -> None:
+    job = _job(pr_body="Fixes #42 — regression in auth flow")
+    await persistence.create_job(job)
+
+    fetched = await persistence.get_job(job.job_id)
+    assert fetched is not None
+    assert fetched.pr_body == "Fixes #42 — regression in auth flow"
+
+
+async def test_pr_body_defaults_to_empty_string(persistence: PersistenceLayer) -> None:
+    job = _job()
+    await persistence.create_job(job)
+
+    fetched = await persistence.get_job(job.job_id)
+    assert fetched is not None
+    assert fetched.pr_body == ""
+
+
 async def test_get_nonexistent_returns_none(persistence: PersistenceLayer) -> None:
     assert await persistence.get_job("no-such-id") is None
 

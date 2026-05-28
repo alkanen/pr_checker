@@ -42,6 +42,7 @@ class JobRow(Base):
     repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
     pr_title: Mapped[str] = mapped_column(Text, nullable=False)
+    pr_body: Mapped[str | None] = mapped_column(Text, nullable=True, server_default="")
     head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     head_branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -60,6 +61,7 @@ def _row_to_job(row: JobRow) -> PRJob:
         repo_full_name=row.repo_full_name,
         pr_number=row.pr_number,
         pr_title=row.pr_title,
+        pr_body=row.pr_body or "",
         head_sha=row.head_sha,
         base_sha=row.base_sha,
         head_branch=row.head_branch,
@@ -94,6 +96,7 @@ class PersistenceLayer:
                 repo_full_name=job.repo_full_name,
                 pr_number=job.pr_number,
                 pr_title=job.pr_title,
+                pr_body=job.pr_body,
                 head_sha=job.head_sha,
                 base_sha=job.base_sha,
                 head_branch=job.head_branch,
