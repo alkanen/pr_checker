@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from httpx import AsyncClient
 
 from pr_checker.github_client import GitHubClient
+from pr_checker.review_orchestrator import ReviewOrchestrator
 from tests.conftest import make_signature
 
 _SECRET = "test-secret"  # noqa: S105
@@ -19,6 +20,7 @@ def _pr_payload(action: str = "opened") -> dict[str, Any]:
         "pull_request": {
             "number": 1,
             "title": "Add feature",
+            "body": None,
             "head": {"sha": "abc123", "ref": "feature-branch"},
             "base": {"sha": "def456", "ref": "main"},
         },
@@ -46,10 +48,7 @@ def _post_webhook(
 
 async def test_valid_pr_returns_202(client: AsyncClient, managed_app: FastAPI) -> None:
     payload = json.dumps(_pr_payload()).encode()
-    with (
-        patch.object(GitHubClient, "post_commit_status", new_callable=AsyncMock),
-        patch.object(GitHubClient, "post_pr_comment", new_callable=AsyncMock),
-    ):
+    with patch.object(ReviewOrchestrator, "run", new_callable=AsyncMock):
         r = await client.post("/webhook", **_post_webhook(payload))
         assert r.status_code == 202
         await asyncio.wait_for(managed_app.state.queue.join(), timeout=5)
@@ -105,7 +104,7 @@ async def test_full_review_flow(client: AsyncClient, managed_app: FastAPI) -> No
 
     with (
         patch.object(GitHubClient, "post_commit_status", new_callable=AsyncMock) as mock_status,
-        patch.object(GitHubClient, "post_pr_comment", new_callable=AsyncMock) as mock_comment,
+        patch.object(ReviewOrchestrator, "run", new_callable=AsyncMock) as mock_run,
     ):
         r = await client.post("/webhook", **_post_webhook(payload))
         assert r.status_code == 202
@@ -114,4 +113,4 @@ async def test_full_review_flow(client: AsyncClient, managed_app: FastAPI) -> No
 
     states = [c.args[2] for c in mock_status.call_args_list]
     assert states == ["pending", "success"]
-    mock_comment.assert_called_once()
+    mock_run.assert_called_once()

@@ -211,3 +211,51 @@ async def test_get_issue_null_body_becomes_empty_string(
     issue = await github.get_issue("owner/repo", 7)
 
     assert issue.body == ""
+
+
+# --- submit_pr_review ---
+
+
+async def test_submit_pr_review_posts_to_reviews_endpoint(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/5/reviews",
+        method="POST",
+        json={"id": 1},
+    )
+    await github.submit_pr_review(
+        repo_full_name="owner/repo",
+        pr_number=5,
+        commit_sha="sha123",
+        body="Looks good overall.",
+        event="APPROVE",
+    )
+
+
+async def test_submit_pr_review_includes_inline_comments(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    import json as _json
+
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/5/reviews",
+        method="POST",
+        json={"id": 2},
+    )
+    comments = [{"path": "src/main.py", "line": 42, "body": "Fix this", "side": "RIGHT"}]
+    await github.submit_pr_review(
+        repo_full_name="owner/repo",
+        pr_number=5,
+        commit_sha="sha123",
+        body="Review body",
+        event="REQUEST_CHANGES",
+        comments=comments,
+    )
+
+    request = httpx_mock.get_request()
+    assert request is not None
+    sent = _json.loads(request.content)
+    assert sent["commit_id"] == "sha123"
+    assert sent["event"] == "REQUEST_CHANGES"
+    assert sent["comments"] == comments

@@ -9,7 +9,7 @@ from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import JobStatus, PRJob, ReviewTrigger
 from pr_checker.queue import ReviewQueue
-from pr_checker.reviewer_config import ConfigManager
+from pr_checker.review_orchestrator import ReviewOrchestrator
 
 
 @pytest.fixture
@@ -26,10 +26,21 @@ def mock_github() -> AsyncMock:
 
 
 @pytest.fixture
+def mock_orchestrator() -> AsyncMock:
+    return AsyncMock(spec=ReviewOrchestrator)
+
+
+@pytest.fixture
 async def queue(
-    persistence: PersistenceLayer, mock_github: AsyncMock
+    persistence: PersistenceLayer,
+    mock_github: AsyncMock,
+    mock_orchestrator: AsyncMock,
 ) -> AsyncGenerator[ReviewQueue, None]:
-    q = ReviewQueue(persistence, cast(GitHubClient, mock_github), ConfigManager())
+    q = ReviewQueue(
+        persistence,
+        cast(GitHubClient, mock_github),
+        cast(ReviewOrchestrator, mock_orchestrator),
+    )
     await q.start()
     yield q
     await q.stop()
@@ -62,8 +73,8 @@ async def test_successful_review_marks_job_completed(
     assert fetched.completed_at is not None
 
 
-async def test_successful_review_posts_status_and_comment(
-    queue: ReviewQueue, mock_github: AsyncMock
+async def test_successful_review_posts_status_and_calls_orchestrator(
+    queue: ReviewQueue, mock_github: AsyncMock, mock_orchestrator: AsyncMock
 ) -> None:
     await queue.enqueue(_job())
     await asyncio.wait_for(queue.join(), timeout=5)
@@ -71,16 +82,16 @@ async def test_successful_review_posts_status_and_comment(
     assert mock_github.post_commit_status.call_count == 2
     states = [c.args[2] for c in mock_github.post_commit_status.call_args_list]
     assert states == ["pending", "success"]
-    mock_github.post_pr_comment.assert_called_once()
+    mock_orchestrator.run.assert_called_once()
 
 
-async def test_failed_comment_marks_job_failed_and_posts_error(
-    queue: ReviewQueue, persistence: PersistenceLayer, mock_github: AsyncMock
+async def test_orchestrator_failure_marks_job_failed_and_posts_error(
+    queue: ReviewQueue,
+    persistence: PersistenceLayer,
+    mock_github: AsyncMock,
+    mock_orchestrator: AsyncMock,
 ) -> None:
-    mock_github.post_pr_comment.side_effect = [
-        Exception("rate limited"),  # first call: placeholder review
-        None,  # second call: error comment
-    ]
+    mock_orchestrator.run.side_effect = Exception("LLM timeout")
 
     job = _job()
     await queue.enqueue(job)
@@ -89,14 +100,18 @@ async def test_failed_comment_marks_job_failed_and_posts_error(
     fetched = await persistence.get_job(job.job_id)
     assert fetched is not None
     assert fetched.status == JobStatus.FAILED
-    assert fetched.error_message == "rate limited"
-    assert mock_github.post_pr_comment.call_count == 2
+    assert fetched.error_message == "LLM timeout"
+    mock_github.post_pr_comment.assert_called_once()
 
 
 async def test_error_comment_failure_is_swallowed(
-    queue: ReviewQueue, persistence: PersistenceLayer, mock_github: AsyncMock
+    queue: ReviewQueue,
+    persistence: PersistenceLayer,
+    mock_github: AsyncMock,
+    mock_orchestrator: AsyncMock,
 ) -> None:
-    mock_github.post_pr_comment.side_effect = Exception("totally broken")
+    mock_orchestrator.run.side_effect = Exception("broken")
+    mock_github.post_pr_comment.side_effect = Exception("also broken")
 
     job = _job()
     await queue.enqueue(job)

@@ -11,3 +11,5 @@ class ServerConfig(BaseSettings):
     config_file: str | None = None
     lm_studio_url: str = ""
     lm_studio_api_key: str = ""
+    openai_api_key: str = ""
+    openai_base_url: str = ""
