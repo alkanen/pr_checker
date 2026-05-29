@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field, ValidationError
 
 from pr_checker.github_client import GitHubClient
 
+_log = logging.getLogger(__name__)
+
 
 class ModelTaskConfig(BaseModel):
     code_review: str = "gpt-4o-mini"
@@ -108,11 +110,11 @@ class ConfigManager:
             with path.open() as f:
                 raw = yaml.safe_load(f)
             if not isinstance(raw, dict):
-                logging.warning("Config file %s is not a YAML mapping; using defaults", path)
+                _log.warning("Config file %s is not a YAML mapping; using defaults", path)
                 return ReviewerConfig()
             return ReviewerConfig.model_validate(raw)
         except (OSError, yaml.YAMLError, ValidationError) as exc:
-            logging.warning("Failed to load config file %s; using defaults: %s", path, exc)
+            _log.warning("Failed to load config file %s; using defaults: %s", path, exc)
             return ReviewerConfig()
 
     async def for_repo(self, repo_full_name: str, client: GitHubClient) -> ReviewerConfig:
@@ -132,7 +134,7 @@ class ConfigManager:
         try:
             raw = yaml.safe_load(content)
         except yaml.YAMLError as exc:
-            logging.warning(
+            _log.warning(
                 ".pr-checker.yml in %s is invalid YAML; using server defaults: %s",
                 repo_full_name,
                 exc,
@@ -140,7 +142,7 @@ class ConfigManager:
             return self._server_config
 
         if not isinstance(raw, dict):
-            logging.warning(
+            _log.warning(
                 ".pr-checker.yml in %s is not a mapping; using server defaults", repo_full_name
             )
             return self._server_config
@@ -149,7 +151,7 @@ class ConfigManager:
             merged_data = _deep_merge(self._server_config.model_dump(), raw)
             merged = ReviewerConfig.model_validate(merged_data)
         except ValidationError as exc:
-            logging.warning(
+            _log.warning(
                 ".pr-checker.yml in %s has invalid values; using server defaults: %s",
                 repo_full_name,
                 exc,

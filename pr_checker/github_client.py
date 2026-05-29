@@ -1,11 +1,14 @@
 import base64
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
 
 from pr_checker.models import DiffHunk, DiffLine, LinkedIssue
+
+_log = logging.getLogger(__name__)
 
 _HUNK_HEADER = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)")
 
@@ -85,6 +88,20 @@ class GitHubClient:
             )
         return self._http
 
+    async def _get(self, path: str, **kwargs: Any) -> httpx.Response:
+        t0 = time.monotonic()
+        r = await self._client().get(path, **kwargs)
+        _log.debug("GET %s -> %d (%.0fms)", path, r.status_code, (time.monotonic() - t0) * 1000)
+        r.raise_for_status()
+        return r
+
+    async def _post(self, path: str, **kwargs: Any) -> httpx.Response:
+        t0 = time.monotonic()
+        r = await self._client().post(path, **kwargs)
+        _log.debug("POST %s -> %d (%.0fms)", path, r.status_code, (time.monotonic() - t0) * 1000)
+        r.raise_for_status()
+        return r
+
     async def post_commit_status(
         self,
         repo_full_name: str,
@@ -93,18 +110,16 @@ class GitHubClient:
         description: str,
         context: str = "pr-checker",
     ) -> None:
-        r = await self._client().post(
+        await self._post(
             f"/repos/{repo_full_name}/statuses/{sha}",
             json={"state": state, "description": description, "context": context},
         )
-        r.raise_for_status()
 
     async def post_pr_comment(self, repo_full_name: str, pr_number: int, body: str) -> None:
-        r = await self._client().post(
+        await self._post(
             f"/repos/{repo_full_name}/issues/{pr_number}/comments",
             json={"body": body},
         )
-        r.raise_for_status()
 
     async def get_pr_diff(
         self,
@@ -118,18 +133,17 @@ class GitHubClient:
         files_processed = 0
 
         while True:
-            r = await self._client().get(
+            r = await self._get(
                 f"/repos/{repo_full_name}/pulls/{pr_number}/files",
                 params={"per_page": per_page, "page": page},
             )
-            r.raise_for_status()
             batch: list[dict[str, Any]] = r.json()
             if not batch:
                 break
 
             for file_info in batch:
                 if files_processed >= max_files:
-                    logging.warning(
+                    _log.warning(
                         "get_pr_diff: %s #%d exceeds max_files=%d; truncating",
                         repo_full_name,
                         pr_number,
@@ -154,11 +168,10 @@ class GitHubClient:
         ref: str,
         size_threshold: int = 100 * 1024,
     ) -> str | None:
-        r = await self._client().get(
+        r = await self._get(
             f"/repos/{repo_full_name}/contents/{path}",
             params={"ref": ref},
         )
-        r.raise_for_status()
         data: dict[str, Any] = r.json()
         if data.get("size", 0) > size_threshold:
             return None
@@ -168,14 +181,12 @@ class GitHubClient:
         return str(content)
 
     async def get_default_branch(self, repo_full_name: str) -> str:
-        r = await self._client().get(f"/repos/{repo_full_name}")
-        r.raise_for_status()
+        r = await self._get(f"/repos/{repo_full_name}")
         data: dict[str, Any] = r.json()
         return str(data["default_branch"])
 
     async def get_issue(self, repo_full_name: str, issue_number: int) -> LinkedIssue:
-        r = await self._client().get(f"/repos/{repo_full_name}/issues/{issue_number}")
-        r.raise_for_status()
+        r = await self._get(f"/repos/{repo_full_name}/issues/{issue_number}")
         data: dict[str, Any] = r.json()
         return LinkedIssue(
             number=data["number"],
@@ -201,11 +212,10 @@ class GitHubClient:
         }
         if comments:
             payload["comments"] = comments
-        r = await self._client().post(
+        await self._post(
             f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
             json=payload,
         )
-        r.raise_for_status()
 
     async def aclose(self) -> None:
         if self._http is not None:

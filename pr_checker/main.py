@@ -12,15 +12,19 @@ from pr_checker.config import ServerConfig
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
 from pr_checker.issue_resolver import IssueResolver
+from pr_checker.logging_setup import configure_logging
 from pr_checker.queue import ReviewQueue
 from pr_checker.review_orchestrator import ReviewOrchestrator
 from pr_checker.reviewer_config import ConfigManager
 from pr_checker.standards_detector import StandardsDetector
 from pr_checker.webhook import parse_pr_event, validate_signature
 
+_log = logging.getLogger(__name__)
+
 
 def create_app(config: ServerConfig | None = None) -> FastAPI:
     cfg = config or ServerConfig()
+    configure_logging(cfg.log_level, cfg.log_format)
 
     persistence = PersistenceLayer(cfg.database_url)
     github = GitHubClient(cfg.github_token)
@@ -58,7 +62,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         if not cfg.github_webhook_secret:
             raise RuntimeError("GITHUB_WEBHOOK_SECRET env var is required")
         if not cfg.github_token:
-            logging.warning("GITHUB_TOKEN is not set; GitHub API calls will fail")
+            _log.warning("GITHUB_TOKEN is not set; GitHub API calls will fail")
         await persistence.init()
         await queue.start()
         yield

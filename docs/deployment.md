@@ -18,6 +18,8 @@
 | `OPENAI_API_KEY` | For LLM review | — | API key for the LLM provider |
 | `OPENAI_BASE_URL` | No | `https://api.openai.com/v1` | Override to point at LM Studio or an Anthropic proxy |
 | `LLM_MODEL` | No | `gpt-4o-mini` | Model name |
+| `LOG_LEVEL` | No | `INFO` | Minimum log level: `TRACE`, `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `LOG_FORMAT` | No | `text` | Log format: `text` (human-readable) or `json` (one JSON object per line, suitable for log aggregators) |
 | `PORT` | No | `8000` | Port the server listens on |
 | `ROOT_PATH` | No | `` | Path prefix when running behind a reverse proxy (see nginx section) |
 | `FORWARDED_ALLOW_IPS` | No | `127.0.0.1` | Comma-separated IPs/CIDRs uvicorn trusts for `X-Forwarded-*` headers. Set to `*` to trust all (e.g. inside a container network). |

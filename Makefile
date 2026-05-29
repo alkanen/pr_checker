@@ -24,7 +24,9 @@ APP_ENV_OPT := \
 	$(if $(OPENAI_BASE_URL),       -e OPENAI_BASE_URL) \
 	$(if $(LLM_MODEL),             -e LLM_MODEL) \
 	$(if $(DATABASE_URL),          -e DATABASE_URL) \
-	$(if $(FORWARDED_ALLOW_IPS),   -e FORWARDED_ALLOW_IPS)
+	$(if $(FORWARDED_ALLOW_IPS),   -e FORWARDED_ALLOW_IPS) \
+	$(if $(LOG_LEVEL),             -e LOG_LEVEL) \
+	$(if $(LOG_FORMAT),            -e LOG_FORMAT)
 
 APP_ENV = $(APP_ENV_REQUIRED) $(APP_ENV_OPT)
 

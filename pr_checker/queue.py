@@ -6,8 +6,11 @@ from typing import Any
 
 from pr_checker.db import PersistenceLayer
 from pr_checker.github_client import GitHubClient
+from pr_checker.logging_setup import reset_job_id, set_job_id
 from pr_checker.models import JobStatus, PRJob
 from pr_checker.review_orchestrator import ReviewOrchestrator
+
+_log = logging.getLogger(__name__)
 
 
 class ReviewQueue:
@@ -31,7 +34,7 @@ class ReviewQueue:
             try:
                 await asyncio.wait_for(self._queue.join(), timeout=5.0)
             except asyncio.TimeoutError:
-                logging.warning("Queue did not drain within timeout; forcing shutdown")
+                _log.warning("Queue did not drain within timeout; forcing shutdown")
             self._task.cancel()
             try:
                 await self._task
@@ -41,6 +44,9 @@ class ReviewQueue:
     async def enqueue(self, job: PRJob) -> None:
         await self._persistence.create_job(job)
         await self._queue.put(job)
+        token = set_job_id(job.job_id)
+        _log.info("Job %s accepted: %s #%d", job.job_id, job.repo_full_name, job.pr_number)
+        reset_job_id(token)
 
     async def join(self) -> None:
         await self._queue.join()
@@ -53,13 +59,21 @@ class ReviewQueue:
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
-                logging.exception("Unhandled error processing job %s; worker continues", job.job_id)
+                _log.exception("Unhandled error processing job %s; worker continues", job.job_id)
             finally:
                 self._queue.task_done()
 
     async def _process(self, job: PRJob) -> None:
+        token = set_job_id(job.job_id)
+        try:
+            await self._run_job(job)
+        finally:
+            reset_job_id(token)
+
+    async def _run_job(self, job: PRJob) -> None:
         job.status = JobStatus.IN_PROGRESS
         job.started_at = datetime.now(timezone.utc)
+        _log.info("Job %s started: %s #%d", job.job_id, job.repo_full_name, job.pr_number)
 
         try:
             await self._persistence.update_job(job)
@@ -69,9 +83,17 @@ class ReviewQueue:
             await self._orchestrator.run(job)
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(timezone.utc)
+            elapsed = (job.completed_at - job.started_at).total_seconds()
             await self._persistence.update_job(job)
             await self._github.post_commit_status(
                 job.repo_full_name, job.head_sha, "success", "PR review complete"
+            )
+            _log.info(
+                "Job %s completed in %.1fs: %s #%d",
+                job.job_id,
+                elapsed,
+                job.repo_full_name,
+                job.pr_number,
             )
         except asyncio.CancelledError:
             raise
@@ -79,9 +101,22 @@ class ReviewQueue:
             job.status = JobStatus.FAILED
             job.completed_at = datetime.now(timezone.utc)
             job.error_message = str(exc)
+            _log.error(
+                "Job %s failed: %s #%d",
+                job.job_id,
+                job.repo_full_name,
+                job.pr_number,
+                exc_info=True,
+            )
             _error_msg = (
                 f"## PR Checker Error\n\nThe automated review failed (job `{job.job_id}`)."
                 " Please check the server logs for details.\n\n---\n*Posted by pr-checker*"
+            )
+            _log.info(
+                "Posting error comment for %s #%d: %s",
+                job.repo_full_name,
+                job.pr_number,
+                _error_msg[:60].replace("\n", " "),
             )
             _steps: list[tuple[str, Callable[[], Coroutine[Any, Any, None]]]] = [
                 ("db_update", lambda: self._persistence.update_job(job)),
@@ -104,7 +139,7 @@ class ReviewQueue:
                 except asyncio.CancelledError:
                     raise
                 except Exception:  # noqa: BLE001
-                    logging.warning(
+                    _log.error(
                         "Best-effort error notification failed [%s] for job %s",
                         step,
                         job.job_id,
