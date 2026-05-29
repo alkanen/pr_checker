@@ -12,6 +12,8 @@ import yaml
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import ProjectStandards
 
+_log = logging.getLogger(__name__)
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:
@@ -46,21 +48,19 @@ class StandardsDetector:
                 if isinstance(tool.get("ruff"), dict):
                     standards.ruff = tool["ruff"]
                 elif "ruff" in tool:
-                    logging.warning(
+                    _log.warning(
                         "tool.ruff in pyproject.toml for %s is not a table; skipping",
                         repo_full_name,
                     )
                 if isinstance(tool.get("mypy"), dict):
                     standards.mypy = tool["mypy"]
                 elif "mypy" in tool:
-                    logging.warning(
+                    _log.warning(
                         "tool.mypy in pyproject.toml for %s is not a table; skipping",
                         repo_full_name,
                     )
             except Exception:
-                logging.warning(
-                    "Failed to parse pyproject.toml for %s", repo_full_name, exc_info=True
-                )
+                _log.warning("Failed to parse pyproject.toml for %s", repo_full_name, exc_info=True)
 
         if not standards.ruff:
             ruff_toml = await self._fetch(repo_full_name, "ruff.toml", ref)
@@ -68,9 +68,7 @@ class StandardsDetector:
                 try:
                     standards.ruff = tomllib.loads(ruff_toml)
                 except Exception:
-                    logging.warning(
-                        "Failed to parse ruff.toml for %s", repo_full_name, exc_info=True
-                    )
+                    _log.warning("Failed to parse ruff.toml for %s", repo_full_name, exc_info=True)
 
         if not standards.mypy:
             mypy_ini = await self._fetch(repo_full_name, "mypy.ini", ref)
@@ -126,7 +124,7 @@ def _parse_ini_section(content: str, section: str) -> dict[str, Any]:
         if section in parser:
             return {k: _coerce_ini_value(v) for k, v in parser[section].items()}
     except configparser.Error as exc:
-        logging.warning("Failed to parse INI config for section [%s]: %s", section, exc)
+        _log.warning("Failed to parse INI config for section [%s]: %s", section, exc)
     return {}
 
 
@@ -136,7 +134,7 @@ def _parse_json_or_yaml(filename: str, content: str) -> dict[str, Any]:
             result = yaml.safe_load(content)
             return result if isinstance(result, dict) else {}
         except Exception as exc:
-            logging.warning("Failed to parse %s as YAML: %s", filename, exc)
+            _log.warning("Failed to parse %s as YAML: %s", filename, exc)
             return {}
     # Try JSON first; extensionless files (.eslintrc, .prettierrc) are often YAML
     try:
@@ -144,10 +142,10 @@ def _parse_json_or_yaml(filename: str, content: str) -> dict[str, Any]:
         if isinstance(result, dict):
             return result
     except (json.JSONDecodeError, ValueError):
-        logging.debug("%s is not valid JSON; trying YAML", filename)
+        _log.debug("%s is not valid JSON; trying YAML", filename)
     try:
         result = yaml.safe_load(content)
         return result if isinstance(result, dict) else {}
     except Exception as exc:
-        logging.warning("Failed to parse %s as YAML: %s", filename, exc)
+        _log.warning("Failed to parse %s as YAML: %s", filename, exc)
         return {}

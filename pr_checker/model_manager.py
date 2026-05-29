@@ -5,6 +5,8 @@ import logging
 from pr_checker.lm_studio_client import LMStudioClient, ModelInfo
 from pr_checker.reviewer_config import ReviewerConfig
 
+_log = logging.getLogger(__name__)
+
 
 class NoModelFitsError(Exception):
     pass
@@ -45,7 +47,7 @@ class ModelManager:
                     break
                 if m.instance_id is None:
                     raise CannotFreeVramError(f"Cannot free VRAM: {m.id} has no instance_id")
-                logging.info("Unloading %s to free VRAM for %s", m.id, target.id)
+                _log.info("Unloading %s to free VRAM for %s", m.id, target.id)
                 await self._client.unload_model(m.instance_id)
                 freed += _model_vram(m, config)
 

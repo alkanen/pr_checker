@@ -7,6 +7,8 @@ from openai import AsyncOpenAI
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import LinkedIssue
 
+_log = logging.getLogger(__name__)
+
 _CLOSING_KEYWORDS = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
     re.IGNORECASE,
@@ -48,7 +50,7 @@ class IssueResolver:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logging.warning("LLM issue inference failed; skipping", exc_info=True)
+                _log.warning("LLM issue inference failed; skipping", exc_info=True)
 
         issues: list[LinkedIssue] = []
         seen: set[int] = set()
@@ -62,9 +64,7 @@ class IssueResolver:
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logging.warning(
-                    "Failed to fetch issue #%d for %s", n, repo_full_name, exc_info=True
-                )
+                _log.warning("Failed to fetch issue #%d for %s", n, repo_full_name, exc_info=True)
         return issues
 
     async def _infer_from_llm(self, llm: AsyncOpenAI, title: str, body: str) -> list[int]:
