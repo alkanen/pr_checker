@@ -41,7 +41,12 @@ class LMStudioClient:
     async def list_models(self) -> list[ModelInfo]:
         response = await self._http.get("models")
         response.raise_for_status()
-        return [self._parse_model(m) for m in response.json().get("models", [])]
+        result: list[ModelInfo] = []
+        for raw in response.json().get("models", []):
+            if raw.get("type") != "llm":
+                continue
+            result.extend(self._parse_model(raw))
+        return result
 
     async def load_model(self, model_id: str) -> None:
         response = await self._http.post("models/load", json={"model": model_id})
@@ -51,24 +56,38 @@ class LMStudioClient:
         response = await self._http.post("models/unload", json={"instance_id": instance_id})
         response.raise_for_status()
 
-    def _parse_model(self, raw: dict[str, Any]) -> ModelInfo:
-        loaded_instances: list[dict[str, Any]] = raw.get("loaded_instances") or []
-        loaded = len(loaded_instances) > 0
-        instance_id = loaded_instances[0].get("id") if loaded_instances else None
-
-        context_length = int(raw.get("max_context_length") or raw.get("context_length") or 4096)
-        # For GGUF models, on-disk file size is a reliable VRAM proxy
+    def _parse_model(self, raw: dict[str, Any]) -> list[ModelInfo]:
         vram_bytes = int(raw.get("size_bytes") or 0)
         num_params = _parse_params_string(raw.get("params_string") or "")
+        max_context = int(raw.get("max_context_length") or raw.get("context_length") or 4096)
 
-        return ModelInfo(
-            id=raw["key"],
-            context_length=context_length,
-            num_params=num_params,
-            vram_bytes=vram_bytes,
-            loaded=loaded,
-            instance_id=instance_id,
-        )
+        loaded_instances: list[dict[str, Any]] = raw.get("loaded_instances") or []
+        if loaded_instances:
+            # One ModelInfo per loaded instance — the instance id is how LM Studio (and
+            # LLM_MODEL) addresses it, and its context_length is what the server will
+            # actually accept (may be lower than the model's absolute max_context_length).
+            return [
+                ModelInfo(
+                    id=inst["id"],
+                    context_length=int(inst.get("config", {}).get("context_length") or max_context),
+                    num_params=num_params,
+                    vram_bytes=vram_bytes,
+                    loaded=True,
+                    instance_id=inst["id"],
+                )
+                for inst in loaded_instances
+            ]
+
+        return [
+            ModelInfo(
+                id=raw["key"],
+                context_length=max_context,
+                num_params=num_params,
+                vram_bytes=vram_bytes,
+                loaded=False,
+                instance_id=None,
+            )
+        ]
 
 
 def _parse_params_string(params_string: str) -> int:
@@ -79,11 +98,11 @@ def _parse_params_string(params_string: str) -> int:
         experts = int(moe.group(1))
         size = float(moe.group(2))
         multiplier = 1e9 if moe.group(3) == "B" else 1e6
-        return int(experts * size * multiplier)
+        return round(experts * size * multiplier)
     # Simple format: "NB" or "NM"
     simple = re.fullmatch(r"(\d+(?:\.\d+)?)([BM])", params_string.strip())
     if simple:
         size = float(simple.group(1))
         multiplier = 1e9 if simple.group(2) == "B" else 1e6
-        return int(size * multiplier)
+        return round(size * multiplier)
     return 0
