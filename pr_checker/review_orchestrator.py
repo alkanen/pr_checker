@@ -24,6 +24,7 @@ class ReviewOrchestrator:
         issue_resolver: IssueResolver,
         model_manager: ModelManager | None,
         openai: AsyncOpenAI,
+        model_override: str | None = None,
     ) -> None:
         self._github = github
         self._config_manager = config_manager
@@ -31,6 +32,7 @@ class ReviewOrchestrator:
         self._issue_resolver = issue_resolver
         self._model_manager = model_manager
         self._openai = openai
+        self._model_override = model_override
         self._formatter = ReviewFormatter()
 
     async def run(self, job: PRJob) -> None:
@@ -45,7 +47,9 @@ class ReviewOrchestrator:
         context = ReviewContext(hunks=hunks, standards=standards, linked_issues=issues)
         estimated_tokens = _estimate_tokens(context)
 
-        if self._model_manager is not None:
+        if self._model_override is not None:
+            model_id = self._model_override
+        elif self._model_manager is not None:
             model_id = await self._model_manager.get_model_for_task(
                 "code_review", estimated_tokens, config
             )

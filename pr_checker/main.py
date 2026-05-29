@@ -49,6 +49,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         issue_resolver=issue_resolver,
         model_manager=model_manager,
         openai=openai_client,
+        model_override=cfg.llm_model or None,
     )
     queue = ReviewQueue(persistence, github, orchestrator)
 
