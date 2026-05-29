@@ -97,7 +97,7 @@ _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 
 
 class LLMClient:
-    DEFAULT_MAX_TURNS = 10
+    DEFAULT_MAX_TURNS = 25
 
     def __init__(
         self,

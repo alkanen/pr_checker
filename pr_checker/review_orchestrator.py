@@ -34,12 +34,24 @@ class ReviewOrchestrator:
         self._formatter = ReviewFormatter()
 
     async def run(self, job: PRJob) -> None:
+        logging.info("Starting review for %s #%d", job.repo_full_name, job.pr_number)
+
         config = await self._config_manager.for_repo(job.repo_full_name, self._github)
 
         hunks = await self._github.get_pr_diff(job.repo_full_name, job.pr_number)
+        logging.info(
+            "Fetched diff for %s #%d: %d hunks", job.repo_full_name, job.pr_number, len(hunks)
+        )
+
         standards = await self._standards_detector.detect(job.repo_full_name, job.head_sha)
         issues = await self._issue_resolver.resolve(
             job.repo_full_name, job.pr_title, job.pr_body, job.head_branch
+        )
+        logging.info(
+            "Context ready for %s #%d: %d linked issues",
+            job.repo_full_name,
+            job.pr_number,
+            len(issues),
         )
 
         context = ReviewContext(hunks=hunks, standards=standards, linked_issues=issues)
@@ -52,6 +64,13 @@ class ReviewOrchestrator:
         else:
             model_id = config.models.tasks.code_review
 
+        logging.info(
+            "Sending %s #%d to model %s (~%d tokens)",
+            job.repo_full_name,
+            job.pr_number,
+            model_id,
+            estimated_tokens,
+        )
         llm = LLMClient(
             openai=self._openai,
             model=model_id,
@@ -60,6 +79,13 @@ class ReviewOrchestrator:
             head_sha=job.head_sha,
         )
         result = await llm.review(context)
+        logging.info(
+            "LLM review complete for %s #%d: verdict=%s, %d findings",
+            job.repo_full_name,
+            job.pr_number,
+            result.verdict,
+            len(result.findings),
+        )
 
         payload = self._formatter.format(result, config)
 
