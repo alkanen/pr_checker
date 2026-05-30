@@ -8,12 +8,13 @@ from openai import AsyncOpenAI
 
 from pr_checker.github_client import GitHubClient
 from pr_checker.issue_resolver import IssueResolver
-from pr_checker.llm_client import LLMClient
+from pr_checker.llm_client import MAX_STATIC_FINDINGS, LLMClient
 from pr_checker.model_manager import ModelManager
-from pr_checker.models import PRJob, ReviewContext
+from pr_checker.models import PRJob, ReviewContext, StaticFinding
 from pr_checker.review_formatter import ReviewFormatter
 from pr_checker.reviewer_config import ConfigManager
 from pr_checker.standards_detector import StandardsDetector
+from pr_checker.static_analyzer import StaticAnalyzer
 
 _log = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class ReviewOrchestrator:
         model_manager: ModelManager | None,
         openai: AsyncOpenAI,
         model_override: str | None = None,
+        static_analyzer: StaticAnalyzer | None = None,
     ) -> None:
         self._github = github
         self._config_manager = config_manager
@@ -36,6 +38,7 @@ class ReviewOrchestrator:
         self._model_manager = model_manager
         self._openai = openai
         self._model_override = model_override
+        self._static_analyzer = static_analyzer
         self._formatter = ReviewFormatter()
 
     async def run(self, job: PRJob) -> None:
@@ -78,7 +81,47 @@ class ReviewOrchestrator:
             job.pr_number,
         )
 
-        context = ReviewContext(hunks=hunks, standards=standards, linked_issues=issues)
+        static_findings: list[StaticFinding] = []
+        if self._static_analyzer is not None and (config.analyzers.ruff or config.analyzers.mypy):
+            t_sa = time.monotonic()
+            python_paths = sorted({h.file_path for h in hunks if h.file_path.endswith(".py")})
+            file_contents: dict[str, str] = {}
+            for path in python_paths:
+                try:
+                    content = await self._github.get_file_content(
+                        job.repo_full_name, path, job.head_sha
+                    )
+                except Exception:
+                    _log.debug("Could not fetch %s for static analysis; skipping", path)
+                    continue
+                if content is not None:
+                    file_contents[path] = content
+            try:
+                static_findings = await self._static_analyzer.run(
+                    file_contents,
+                    run_ruff=config.analyzers.ruff,
+                    run_mypy=config.analyzers.mypy,
+                    ruff_config=standards.ruff or None,
+                    mypy_config=standards.mypy or None,
+                )
+                _log.info(
+                    "Static analysis in %.1fs: %d findings for %s #%d",
+                    time.monotonic() - t_sa,
+                    len(static_findings),
+                    job.repo_full_name,
+                    job.pr_number,
+                )
+            except Exception:
+                _log.warning(
+                    "Static analysis failed for %s #%d; continuing without findings",
+                    job.repo_full_name,
+                    job.pr_number,
+                    exc_info=True,
+                )
+
+        context = ReviewContext(
+            hunks=hunks, standards=standards, linked_issues=issues, static_findings=static_findings
+        )
         estimated_tokens = _estimate_tokens(context)
 
         if self._model_override is not None:
@@ -158,4 +201,6 @@ class ReviewOrchestrator:
 def _estimate_tokens(context: ReviewContext) -> int:
     chars = sum(len(line.content) for hunk in context.hunks for line in hunk.lines)
     chars += sum(len(issue.body) for issue in context.linked_issues)
+    shown_findings = context.static_findings[:MAX_STATIC_FINDINGS]
+    chars += sum(len(f.file_path) + len(f.code) + len(f.message) for f in shown_findings)
     return max(1000, chars // 4)
