@@ -6,9 +6,6 @@ import time
 from typing import Any
 
 from openai import AsyncOpenAI
-from openai.types.chat.chat_completion_message_function_tool_call import (
-    ChatCompletionMessageFunctionToolCall,
-)
 
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import Finding, ReviewContext, ReviewResult, Severity
@@ -99,6 +96,7 @@ _MAX_SNIPPET_LINES = 200
 MAX_STATIC_FINDINGS = 20
 _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 _LOG_TRUNCATE = 200
+_STREAM_LOG_INTERVAL = 30.0
 
 
 def _truncate(text: str, limit: int = _LOG_TRUNCATE) -> str:
@@ -141,73 +139,43 @@ class LLMClient:
                 len(messages),
             )
 
-            t0 = time.monotonic()
-            response = await self._openai.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                tools=_TOOLS,
-                tool_choice="auto",
-            )
-            elapsed = time.monotonic() - t0
+            content, tool_calls, finish_reason, elapsed = await self._stream_turn(messages, turn)
 
-            choice = response.choices[0]
-
-            # Build the tool-name list for the debug summary before appending to messages.
-            tool_names = [
-                tc.function.name
-                for tc in (choice.message.tool_calls or [])
-                if isinstance(tc, ChatCompletionMessageFunctionToolCall)
-            ]
-            if tool_names:
+            if tool_calls:
                 _log.debug(
-                    "Turn %d/%d responded in %.1fs: tools=[%s]",
+                    "Turn %d/%d completed in %.1fs: tools=[%s]",
                     turn + 1,
                     self._max_turns,
                     elapsed,
-                    ", ".join(tool_names),
+                    ", ".join(tc["function"]["name"] for tc in tool_calls),
                 )
             else:
                 _log.debug(
-                    "Turn %d/%d responded in %.1fs: no tools (finish=%s)",
+                    "Turn %d/%d completed in %.1fs: no tools (finish=%s)",
                     turn + 1,
                     self._max_turns,
                     elapsed,
-                    choice.finish_reason,
+                    finish_reason,
                 )
 
-            # Append assistant message so the next turn has full context
             msg: dict[str, Any] = {"role": "assistant"}
-            if choice.message.content:
-                msg["content"] = choice.message.content
-            if choice.message.tool_calls:
-                msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in choice.message.tool_calls
-                    if isinstance(tc, ChatCompletionMessageFunctionToolCall)
-                ]
+            if content:
+                msg["content"] = content
+            if tool_calls:
+                msg["tool_calls"] = tool_calls
             messages.append(msg)
 
-            if not choice.message.tool_calls:
+            if not tool_calls:
                 _log.warning(
                     "LLM did not call submit_review on turn %d (model=%s); fallback result",
                     turn + 1,
                     self._model,
                 )
-                assistant_content = choice.message.content or ""
-                return _fallback_result("Model did not call submit_review.", assistant_content)
+                return _fallback_result("Model did not call submit_review.", content or "")
 
-            for tool_call in choice.message.tool_calls:
-                if not isinstance(tool_call, ChatCompletionMessageFunctionToolCall):
-                    continue
-                name = tool_call.function.name
-                args: dict[str, Any] = json.loads(tool_call.function.arguments)
+            for tool_call in tool_calls:
+                name = tool_call["function"]["name"]
+                args: dict[str, Any] = json.loads(tool_call["function"]["arguments"])
 
                 if name == "submit_review":
                     _log.debug(
@@ -225,7 +193,7 @@ class LLMClient:
                 elapsed_ms = int((time.monotonic() - t1) * 1000)
                 _log.debug("Tool result: %s -> %d chars (%dms)", name, len(result_text), elapsed_ms)
                 messages.append(
-                    {"role": "tool", "tool_call_id": tool_call.id, "content": result_text}
+                    {"role": "tool", "tool_call_id": tool_call["id"], "content": result_text}
                 )
 
         _log.warning(
@@ -236,6 +204,90 @@ class LLMClient:
         return _fallback_result(
             f"Review exceeded the maximum tool-call turn limit ({self._max_turns})."
         )
+
+    async def _stream_turn(
+        self,
+        messages: list[Any],
+        turn: int,
+    ) -> tuple[str | None, list[dict[str, Any]], str | None, float]:
+        """Stream one LLM turn; accumulate deltas and return (content, tool_calls, finish, elapsed).
+
+        LLM_TIMEOUT acts as the read timeout — max wait between any two received chunks.
+        This covers slow time-to-first-token on CPU-only backends as well as stalls mid-stream.
+        """
+        content_parts: list[str] = []
+        tool_calls_acc: dict[int, dict[str, Any]] = {}
+        finish_reason: str | None = None
+        chunk_count = 0
+        t0 = time.monotonic()
+        t_last_log = t0
+
+        async with await self._openai.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            tools=_TOOLS,
+            tool_choice="auto",
+            stream=True,
+        ) as stream:
+            async for chunk in stream:
+                chunk_count += 1
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                if choice.finish_reason is not None:
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
+                if delta.content:
+                    content_parts.append(delta.content)
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                        if tc.id:
+                            tool_calls_acc[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_acc[idx]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+                now = time.monotonic()
+                if now - t_last_log >= _STREAM_LOG_INTERVAL:
+                    _log.debug(
+                        "Streaming turn %d/%d: %d chunks, %.0fs elapsed (model=%s)",
+                        turn + 1,
+                        self._max_turns,
+                        chunk_count,
+                        now - t0,
+                        self._model,
+                    )
+                    t_last_log = now
+
+        elapsed = time.monotonic() - t0
+        content = "".join(content_parts) or None
+        tool_calls: list[dict[str, Any]] = []
+        for idx, acc in sorted(tool_calls_acc.items()):
+            if not acc["name"]:
+                _log.warning("Skipping streamed tool call at index %d: missing function name", idx)
+                continue
+            call_id = acc["id"] or f"call_{idx}"
+            if not acc["id"]:
+                # Some OpenAI-compatible backends (e.g. LM Studio) omit the id on delta chunks.
+                _log.warning(
+                    "Streamed tool call %r at index %d has no id; synthesizing %r",
+                    acc["name"],
+                    idx,
+                    call_id,
+                )
+            tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": acc["name"], "arguments": acc["arguments"]},
+                }
+            )
+        return content, tool_calls, finish_reason, elapsed
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> str:
         if name == "get_code_snippet":

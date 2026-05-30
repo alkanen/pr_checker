@@ -35,6 +35,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     openai_client = AsyncOpenAI(
         api_key=cfg.openai_api_key or "sk-placeholder",
         base_url=cfg.openai_base_url or None,
+        timeout=cfg.llm_timeout,
     )
     issue_resolver = IssueResolver(github, llm=openai_client)
 

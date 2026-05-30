@@ -14,6 +14,13 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     ChatCompletionMessageFunctionToolCall,
     Function,
 )
+from openai.types.chat.chat_completion_chunk import (
+    ChatCompletionChunk,
+    Choice as ChunkChoice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
 from pytest_httpx import HTTPXMock
 
 from pr_checker.github_client import GitHubClient
@@ -91,6 +98,119 @@ def _submit_review_response(
     )
 
 
+class _MockStream:
+    def __init__(self, chunks: list[ChatCompletionChunk]) -> None:
+        self._chunks = chunks
+
+    async def __aenter__(self) -> "_MockStream":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
+    def __aiter__(self) -> Any:
+        return self._iterate()
+
+    async def _iterate(self) -> Any:
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _stream_from_response(response: ChatCompletion) -> _MockStream:
+    chunks: list[ChatCompletionChunk] = []
+    choice = response.choices[0]
+    if choice.message.content:
+        chunks.append(
+            ChatCompletionChunk(
+                id="chunk-test",
+                choices=[
+                    ChunkChoice(
+                        delta=ChoiceDelta(content=choice.message.content),
+                        index=0,
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                ],
+                created=0,
+                model="gpt-4o-mini",
+                object="chat.completion.chunk",
+            )
+        )
+    if choice.message.tool_calls:
+        for i, tc in enumerate(choice.message.tool_calls):
+            if not isinstance(tc, ChatCompletionMessageFunctionToolCall):
+                continue
+            chunks.append(
+                ChatCompletionChunk(
+                    id="chunk-test",
+                    choices=[
+                        ChunkChoice(
+                            delta=ChoiceDelta(
+                                tool_calls=[
+                                    ChoiceDeltaToolCall(
+                                        index=i,
+                                        id=tc.id,
+                                        type="function",
+                                        function=ChoiceDeltaToolCallFunction(
+                                            name=tc.function.name, arguments=""
+                                        ),
+                                    )
+                                ]
+                            ),
+                            index=0,
+                            finish_reason=None,
+                            logprobs=None,
+                        )
+                    ],
+                    created=0,
+                    model="gpt-4o-mini",
+                    object="chat.completion.chunk",
+                )
+            )
+            chunks.append(
+                ChatCompletionChunk(
+                    id="chunk-test",
+                    choices=[
+                        ChunkChoice(
+                            delta=ChoiceDelta(
+                                tool_calls=[
+                                    ChoiceDeltaToolCall(
+                                        index=i,
+                                        function=ChoiceDeltaToolCallFunction(
+                                            arguments=tc.function.arguments
+                                        ),
+                                    )
+                                ]
+                            ),
+                            index=0,
+                            finish_reason=None,
+                            logprobs=None,
+                        )
+                    ],
+                    created=0,
+                    model="gpt-4o-mini",
+                    object="chat.completion.chunk",
+                )
+            )
+    chunks.append(
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(),
+                    index=0,
+                    finish_reason=choice.finish_reason or "stop",
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        )
+    )
+    return _MockStream(chunks)
+
+
 def _mock_github_repo(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url="https://api.github.com/repos/owner/repo",
@@ -154,7 +274,9 @@ async def test_full_pipeline_posts_summary_and_formal_review(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
         orchestrator = ReviewOrchestrator(
@@ -183,7 +305,7 @@ async def test_summary_comment_not_posted_when_disabled(
 
     mock_openai = AsyncMock()
     mock_openai.chat.completions.create = AsyncMock(
-        return_value=_submit_review_response(verdict="comment")
+        return_value=_stream_from_response(_submit_review_response(verdict="comment"))
     )
 
     from pr_checker.reviewer_config import OutputConfig, ReviewerConfig
@@ -224,7 +346,9 @@ async def test_inline_comments_posted_when_formal_review_disabled(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     from pr_checker.reviewer_config import OutputConfig, ReviewerConfig
 
@@ -270,7 +394,9 @@ async def test_model_manager_used_when_provided(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     mock_model_manager = AsyncMock(spec=ModelManager)
     mock_model_manager.get_model_for_task = AsyncMock(return_value="custom-model")
@@ -298,7 +424,9 @@ async def test_no_review_submitted_when_all_output_disabled(
     _mock_pr_diff(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     from pr_checker.reviewer_config import OutputConfig, ReviewerConfig
 
@@ -337,7 +465,9 @@ async def test_formatter_called_with_review_result(
 
     mock_openai = AsyncMock()
     mock_openai.chat.completions.create = AsyncMock(
-        return_value=_submit_review_response(verdict="approve", summary="All good")
+        return_value=_stream_from_response(
+            _submit_review_response(verdict="approve", summary="All good")
+        )
     )
 
     captured_results = []
@@ -380,7 +510,9 @@ async def test_llm_client_receives_correct_repo_and_sha(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     captured_clients: list[LLMClient] = []
     original_review = LLMClient.review
@@ -422,7 +554,9 @@ async def test_static_findings_passed_to_llm_context(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     injected_finding = StaticFinding(
         tool="ruff", file_path="main.py", line=1, col=1, code="F401", message="unused import"
@@ -470,7 +604,9 @@ async def test_static_analyzer_failure_does_not_block_review(
     _mock_submit_review(httpx_mock)
 
     mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
 
     mock_analyzer = AsyncMock(spec=StaticAnalyzer)
     mock_analyzer.run = AsyncMock(side_effect=RuntimeError("disk full"))
