@@ -47,6 +47,16 @@ class LinkedIssue:
     assignees: list[str]
 
 
+@dataclass
+class StaticFinding:
+    tool: str  # "ruff" | "mypy"
+    file_path: str
+    line: int | None
+    col: int | None
+    code: str
+    message: str
+
+
 class Severity(str, Enum):
     CRITICAL = "critical"
     HIGH = "high"
@@ -86,6 +96,7 @@ class ReviewContext:
     hunks: list[DiffHunk]
     standards: ProjectStandards
     linked_issues: list[LinkedIssue]
+    static_findings: list[StaticFinding] = field(default_factory=list)
 
 
 @dataclass

@@ -17,6 +17,7 @@ from pr_checker.queue import ReviewQueue
 from pr_checker.review_orchestrator import ReviewOrchestrator
 from pr_checker.reviewer_config import ConfigManager
 from pr_checker.standards_detector import StandardsDetector
+from pr_checker.static_analyzer import StaticAnalyzer
 from pr_checker.webhook import parse_pr_event, validate_signature
 
 _log = logging.getLogger(__name__)
@@ -54,6 +55,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         model_manager=model_manager,
         openai=openai_client,
         model_override=cfg.llm_model or None,
+        static_analyzer=StaticAnalyzer(),
     )
     queue = ReviewQueue(persistence, github, orchestrator)
 

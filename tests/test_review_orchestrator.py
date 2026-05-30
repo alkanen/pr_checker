@@ -1,5 +1,6 @@
 """Full orchestration tests with mocked GitHub HTTP and mocked LLM."""
 
+import base64
 import json
 from collections.abc import AsyncGenerator
 from typing import Any, cast
@@ -19,11 +20,12 @@ from pr_checker.github_client import GitHubClient
 from pr_checker.issue_resolver import IssueResolver
 from pr_checker.llm_client import LLMClient
 from pr_checker.model_manager import ModelManager
-from pr_checker.models import PRJob, ProjectStandards, ReviewTrigger
+from pr_checker.models import PRJob, ProjectStandards, ReviewContext, ReviewTrigger, StaticFinding
 from pr_checker.review_formatter import ReviewFormatter
 from pr_checker.review_orchestrator import ReviewOrchestrator
 from pr_checker.reviewer_config import ConfigManager
 from pr_checker.standards_detector import StandardsDetector
+from pr_checker.static_analyzer import StaticAnalyzer
 
 
 @pytest.fixture
@@ -125,6 +127,17 @@ def _mock_submit_review(httpx_mock: HTTPXMock) -> None:
         url="https://api.github.com/repos/owner/repo/pulls/1/reviews",
         method="POST",
         json={"id": 1},
+    )
+
+
+def _mock_file_content(httpx_mock: HTTPXMock, path: str = "main.py", sha: str = "abc123") -> None:
+    httpx_mock.add_response(
+        url=f"https://api.github.com/repos/owner/repo/contents/{path}?ref={sha}",
+        json={
+            "size": 6,
+            "content": base64.b64encode(b"x = 1\n").decode(),
+            "encoding": "base64",
+        },
     )
 
 
@@ -393,3 +406,88 @@ async def test_llm_client_receives_correct_repo_and_sha(
     assert len(captured_clients) == 1
     assert captured_clients[0]._repo == "owner/repo"
     assert captured_clients[0]._sha == "deadbeef"
+
+
+# --- static analysis pre-pass ---
+
+
+async def test_static_findings_passed_to_llm_context(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+    _mock_file_content(httpx_mock)  # main.py fetched for static analysis
+    _mock_post_pr_comment(httpx_mock)
+    _mock_submit_review(httpx_mock)
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+
+    injected_finding = StaticFinding(
+        tool="ruff", file_path="main.py", line=1, col=1, code="F401", message="unused import"
+    )
+    mock_analyzer = AsyncMock(spec=StaticAnalyzer)
+    mock_analyzer.run = AsyncMock(return_value=[injected_finding])
+
+    captured_contexts: list[ReviewContext] = []
+    original_review = LLMClient.review
+
+    async def _spy_review(self: LLMClient, context: ReviewContext) -> Any:
+        captured_contexts.append(context)
+        return await original_review(self, context)
+
+    with (
+        patch.object(StandardsDetector, "detect", return_value=ProjectStandards()),
+        patch.object(LLMClient, "review", _spy_review),
+    ):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+            static_analyzer=mock_analyzer,
+        )
+        await orchestrator.run(_job())
+
+    assert len(captured_contexts) == 1
+    assert captured_contexts[0].static_findings == [injected_finding]
+    mock_analyzer.run.assert_called_once()
+    call_kwargs = mock_analyzer.run.call_args
+    assert "main.py" in call_kwargs.args[0]
+
+
+async def test_static_analyzer_failure_does_not_block_review(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+    _mock_file_content(httpx_mock)
+    _mock_post_pr_comment(httpx_mock)
+    _mock_submit_review(httpx_mock)
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_review_response())
+
+    mock_analyzer = AsyncMock(spec=StaticAnalyzer)
+    mock_analyzer.run = AsyncMock(side_effect=RuntimeError("disk full"))
+
+    with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+            static_analyzer=mock_analyzer,
+        )
+        await orchestrator.run(_job())
+
+    mock_openai.chat.completions.create.assert_called_once()
+    requests = httpx_mock.get_requests()
+    urls = [str(r.url) for r in requests]
+    assert any("pulls/1/reviews" in u for u in urls)

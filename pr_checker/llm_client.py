@@ -96,6 +96,7 @@ _TOOLS: list[Any] = [
 ]
 
 _MAX_SNIPPET_LINES = 200
+MAX_STATIC_FINDINGS = 20
 _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 _LOG_TRUNCATE = 200
 
@@ -342,6 +343,25 @@ def _build_user_message(context: ReviewContext) -> str:
     if std_parts:
         parts.append("## Project Standards\n")
         parts.extend(std_parts)
+        parts.append("")
+
+    if context.static_findings:
+        shown = context.static_findings[:MAX_STATIC_FINDINGS]
+        omitted = len(context.static_findings) - len(shown)
+        parts.append("## Static Analysis Findings\n")
+        parts.append(
+            "The following issues were detected by automated tools before this review. "
+            "Evaluate whether each is a real issue in this PR's context — some may be "
+            "false positives or pre-existing issues outside the scope of this change.\n"
+        )
+        for f in shown:
+            loc = f"{f.file_path}:{f.line}" if f.line is not None else f.file_path
+            code_part = f" ({f.code})" if f.code else ""
+            parts.append(f"- [{f.tool}] {loc}{code_part}: {f.message}")
+        if omitted:
+            parts.append(
+                f"\n*{omitted} additional finding(s) omitted — address the listed ones first.*"
+            )
         parts.append("")
 
     parts.append(

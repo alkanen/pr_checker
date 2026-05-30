@@ -224,6 +224,33 @@ async def test_repo_cannot_enable_server_disabled_output(
     assert result.output.formal_review is False
 
 
+async def test_repo_can_disable_analyzer(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    manager = ConfigManager(config_file=FIXTURES / "server_full.yml")
+    _mock_repo(httpx_mock)
+    _mock_config(httpx_mock, "analyzers:\n  ruff: false\n")
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.analyzers.ruff is False
+    assert result.analyzers.mypy is True
+
+
+async def test_repo_cannot_enable_server_disabled_analyzer(
+    tmp_path: Path, github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    cfg = tmp_path / "server.yml"
+    cfg.write_text("analyzers:\n  mypy: false\n")
+
+    manager = ConfigManager(config_file=cfg)
+    _mock_repo(httpx_mock)
+    _mock_config(httpx_mock, "analyzers:\n  mypy: true\n")
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.analyzers.mypy is False
+    assert result.analyzers.ruff is True
+
+
 async def test_repo_cannot_lower_bytes_per_param(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:

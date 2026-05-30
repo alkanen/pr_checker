@@ -31,6 +31,11 @@ class QdrantConfig(BaseModel):
     url: str = "http://localhost:6333"
 
 
+class AnalyzersConfig(BaseModel):
+    ruff: bool = True
+    mypy: bool = True
+
+
 class ChecksConfig(BaseModel):
     code_quality: bool = True
     security: bool = True
@@ -53,6 +58,7 @@ class ReviewerConfig(BaseModel):
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     checks: ChecksConfig = Field(default_factory=ChecksConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
+    analyzers: AnalyzersConfig = Field(default_factory=AnalyzersConfig)
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -79,10 +85,16 @@ def _enforce_limits(merged: ReviewerConfig, server: ReviewerConfig) -> ReviewerC
         if isinstance(server_val, bool) and not server_val:
             output_data[field_name] = False
 
+    analyzers_data = merged.analyzers.model_dump()
+    for field_name, server_val in server.analyzers.model_dump().items():
+        if isinstance(server_val, bool) and not server_val:
+            analyzers_data[field_name] = False
+
     return merged.model_copy(
         update={
             "checks": ChecksConfig(**checks_data),
             "output": OutputConfig(**output_data),
+            "analyzers": AnalyzersConfig(**analyzers_data),
             "vram_budget_gb": min(merged.vram_budget_gb, server.vram_budget_gb),
             # Repos cannot reduce bytes_per_param below the server floor: a lower
             # value underestimates VRAM and can cause the server to overcommit GPU memory.
