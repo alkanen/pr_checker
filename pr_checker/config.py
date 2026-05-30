@@ -14,5 +14,6 @@ class ServerConfig(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     llm_model: str = ""
+    llm_timeout: float | None = 600.0
     log_level: str = "INFO"
     log_format: str = "text"

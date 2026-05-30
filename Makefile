@@ -23,6 +23,7 @@ APP_ENV_OPT := \
 	$(if $(OPENAI_API_KEY),        -e OPENAI_API_KEY) \
 	$(if $(OPENAI_BASE_URL),       -e OPENAI_BASE_URL) \
 	$(if $(LLM_MODEL),             -e LLM_MODEL) \
+	$(if $(LLM_TIMEOUT),           -e LLM_TIMEOUT) \
 	$(if $(DATABASE_URL),          -e DATABASE_URL) \
 	$(if $(FORWARDED_ALLOW_IPS),   -e FORWARDED_ALLOW_IPS) \
 	$(if $(LOG_LEVEL),             -e LOG_LEVEL) \

@@ -1,6 +1,6 @@
 import json
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openai.types.chat import ChatCompletionMessageToolCallUnion
@@ -10,7 +10,15 @@ from openai.types.chat.chat_completion_message_function_tool_call import (
     ChatCompletionMessageFunctionToolCall,
     Function,
 )
+from openai.types.chat.chat_completion_chunk import (
+    ChatCompletionChunk,
+    Choice as ChunkChoice,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
 
+from pr_checker.config import ServerConfig
 from pr_checker.github_client import GitHubClient
 from pr_checker.llm_client import LLMClient, _parse_review_result
 from pr_checker.models import (
@@ -21,6 +29,139 @@ from pr_checker.models import (
     ReviewContext,
     Severity,
 )
+
+
+# ---------------------------------------------------------------------------
+# Streaming mock infrastructure
+# ---------------------------------------------------------------------------
+
+
+class _MockStream:
+    """Async context manager / async iterable backed by a list of chunks."""
+
+    def __init__(self, chunks: list[ChatCompletionChunk]) -> None:
+        self._chunks = chunks
+
+    async def __aenter__(self) -> "_MockStream":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        pass
+
+    def __aiter__(self) -> Any:
+        return self._iterate()
+
+    async def _iterate(self) -> Any:
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _stream_from_response(response: ChatCompletion) -> _MockStream:
+    """Convert a non-streaming ChatCompletion into a minimal streaming mock."""
+    chunks: list[ChatCompletionChunk] = []
+    choice = response.choices[0]
+
+    if choice.message.content:
+        chunks.append(
+            ChatCompletionChunk(
+                id="chunk-test",
+                choices=[
+                    ChunkChoice(
+                        delta=ChoiceDelta(content=choice.message.content),
+                        index=0,
+                        finish_reason=None,
+                        logprobs=None,
+                    )
+                ],
+                created=0,
+                model="gpt-4o-mini",
+                object="chat.completion.chunk",
+            )
+        )
+
+    if choice.message.tool_calls:
+        for i, tc in enumerate(choice.message.tool_calls):
+            if not isinstance(tc, ChatCompletionMessageFunctionToolCall):
+                continue
+            # Chunk 1: call id + function name
+            chunks.append(
+                ChatCompletionChunk(
+                    id="chunk-test",
+                    choices=[
+                        ChunkChoice(
+                            delta=ChoiceDelta(
+                                tool_calls=[
+                                    ChoiceDeltaToolCall(
+                                        index=i,
+                                        id=tc.id,
+                                        type="function",
+                                        function=ChoiceDeltaToolCallFunction(
+                                            name=tc.function.name,
+                                            arguments="",
+                                        ),
+                                    )
+                                ]
+                            ),
+                            index=0,
+                            finish_reason=None,
+                            logprobs=None,
+                        )
+                    ],
+                    created=0,
+                    model="gpt-4o-mini",
+                    object="chat.completion.chunk",
+                )
+            )
+            # Chunk 2: arguments
+            chunks.append(
+                ChatCompletionChunk(
+                    id="chunk-test",
+                    choices=[
+                        ChunkChoice(
+                            delta=ChoiceDelta(
+                                tool_calls=[
+                                    ChoiceDeltaToolCall(
+                                        index=i,
+                                        function=ChoiceDeltaToolCallFunction(
+                                            arguments=tc.function.arguments,
+                                        ),
+                                    )
+                                ]
+                            ),
+                            index=0,
+                            finish_reason=None,
+                            logprobs=None,
+                        )
+                    ],
+                    created=0,
+                    model="gpt-4o-mini",
+                    object="chat.completion.chunk",
+                )
+            )
+
+    # Final chunk carries the finish_reason
+    chunks.append(
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(),
+                    index=0,
+                    finish_reason=choice.finish_reason or "stop",
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        )
+    )
+    return _MockStream(chunks)
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming response builders (still useful for _stream_from_response)
+# ---------------------------------------------------------------------------
 
 
 def _context() -> ReviewContext:
@@ -119,13 +260,38 @@ def _client(mock_openai: Any, mock_github: AsyncMock, max_turns: int = 10) -> LL
     )
 
 
-# --- submit_review termination ---
+def _mock_openai(*responses: ChatCompletion) -> Any:
+    """Return a mock openai client whose create yields streaming versions of responses."""
+    streams = [_stream_from_response(r) for r in responses]
+    mock = MagicMock()
+    mock.chat.completions.create = AsyncMock(
+        side_effect=streams if len(streams) > 1 else None,
+        return_value=streams[0] if len(streams) == 1 else None,
+    )
+    return mock
+
+
+# ---------------------------------------------------------------------------
+# ServerConfig — llm_timeout
+# ---------------------------------------------------------------------------
+
+
+def test_llm_timeout_default() -> None:
+    assert ServerConfig().llm_timeout == 600.0
+
+
+def test_llm_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_TIMEOUT", "120")
+    assert ServerConfig().llm_timeout == 120.0
+
+
+# ---------------------------------------------------------------------------
+# submit_review termination
+# ---------------------------------------------------------------------------
 
 
 async def test_submit_review_returns_result(mock_github: AsyncMock) -> None:
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_response())
-    result = await _client(mock_openai, mock_github).review(_context())
+    result = await _client(_mock_openai(_submit_response()), mock_github).review(_context())
 
     assert len(result.findings) == 1
     assert result.findings[0].severity == Severity.HIGH
@@ -146,11 +312,9 @@ async def test_submit_review_parses_all_finding_fields(mock_github: AsyncMock) -
             "line_number": 10,
         }
     ]
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(
-        return_value=_submit_response(findings=findings)
+    result = await _client(_mock_openai(_submit_response(findings=findings)), mock_github).review(
+        _context()
     )
-    result = await _client(mock_openai, mock_github).review(_context())
 
     f = result.findings[0]
     assert f.severity == Severity.CRITICAL
@@ -161,15 +325,16 @@ async def test_submit_review_parses_all_finding_fields(mock_github: AsyncMock) -
     assert f.line_number == 10
 
 
-# --- get_code_snippet dispatch ---
+# ---------------------------------------------------------------------------
+# get_code_snippet dispatch
+# ---------------------------------------------------------------------------
 
 
 async def test_get_code_snippet_resolved_and_loop_continues(mock_github: AsyncMock) -> None:
     mock_github.get_file_content.return_value = "line1\nline2\nline3"
     r1 = _tool_call_response("get_code_snippet", {"file_path": "main.py", "start_line": 1})
+    mock_openai = _mock_openai(r1, _submit_response())
 
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(side_effect=[r1, _submit_response()])
     result = await _client(mock_openai, mock_github).review(_context())
 
     mock_github.get_file_content.assert_called_once_with("owner/repo", "main.py", "abc123")
@@ -179,13 +344,11 @@ async def test_get_code_snippet_resolved_and_loop_continues(mock_github: AsyncMo
 
 async def test_get_code_snippet_clamps_end_line(mock_github: AsyncMock) -> None:
     mock_github.get_file_content.return_value = "\n".join(f"line{i}" for i in range(1, 1001))
-    # Request end_line far beyond start + _MAX_SNIPPET_LINES
     r1 = _tool_call_response(
         "get_code_snippet", {"file_path": "big.py", "start_line": 1, "end_line": 9999}
     )
+    mock_openai = _mock_openai(r1, _submit_response())
 
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(side_effect=[r1, _submit_response()])
     await _client(mock_openai, mock_github).review(_context())
 
     # The tool result appended to messages should not be 9999 lines
@@ -200,9 +363,8 @@ async def test_get_code_snippet_file_fetch_error_returns_error_text(
 ) -> None:
     mock_github.get_file_content.side_effect = Exception("network error")
     r1 = _tool_call_response("get_code_snippet", {"file_path": "missing.py"})
+    mock_openai = _mock_openai(r1, _submit_response())
 
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(side_effect=[r1, _submit_response()])
     await _client(mock_openai, mock_github).review(_context())
 
     second_call_messages = mock_openai.chat.completions.create.call_args_list[1].kwargs["messages"]
@@ -210,14 +372,15 @@ async def test_get_code_snippet_file_fetch_error_returns_error_text(
     assert "Error" in tool_result["content"]
 
 
-# --- search_code stub ---
+# ---------------------------------------------------------------------------
+# search_code stub
+# ---------------------------------------------------------------------------
 
 
 async def test_search_code_returns_empty_stub(mock_github: AsyncMock) -> None:
     r1 = _tool_call_response("search_code", {"query": "database connection"})
+    mock_openai = _mock_openai(r1, _submit_response())
 
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(side_effect=[r1, _submit_response()])
     await _client(mock_openai, mock_github).review(_context())
 
     second_call_messages = mock_openai.chat.completions.create.call_args_list[1].kwargs["messages"]
@@ -225,17 +388,19 @@ async def test_search_code_returns_empty_stub(mock_github: AsyncMock) -> None:
     assert tool_result["content"] == "[]"
 
 
-# --- max turns ---
+# ---------------------------------------------------------------------------
+# max turns
+# ---------------------------------------------------------------------------
 
 
 async def test_max_turns_enforced(mock_github: AsyncMock) -> None:
     mock_github.get_file_content.return_value = "content"
-
-    def _looping_response() -> ChatCompletion:
-        return _tool_call_response("get_code_snippet", {"file_path": "a.py"})
-
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(side_effect=lambda **_: _looping_response())
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=lambda **_: _stream_from_response(
+            _tool_call_response("get_code_snippet", {"file_path": "a.py"})
+        )
+    )
     result = await _client(mock_openai, mock_github, max_turns=3).review(_context())
 
     assert mock_openai.chat.completions.create.call_count == 3
@@ -243,13 +408,13 @@ async def test_max_turns_enforced(mock_github: AsyncMock) -> None:
     assert result.verdict == "comment"
 
 
-# --- no-tool-calls fallback ---
+# ---------------------------------------------------------------------------
+# no-tool-calls fallback
+# ---------------------------------------------------------------------------
 
 
 async def test_no_tool_calls_returns_fallback_with_system_finding(mock_github: AsyncMock) -> None:
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_no_tool_calls_response())
-    result = await _client(mock_openai, mock_github).review(_context())
+    result = await _client(_mock_openai(_no_tool_calls_response()), mock_github).review(_context())
 
     assert result.verdict == "comment"
     assert any(f.category == "system" for f in result.findings)
@@ -258,16 +423,147 @@ async def test_no_tool_calls_returns_fallback_with_system_finding(mock_github: A
 async def test_no_tool_calls_surfaces_assistant_content_as_summary(
     mock_github: AsyncMock,
 ) -> None:
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(
-        return_value=_no_tool_calls_response(content="The code looks problematic here.")
-    )
-    result = await _client(mock_openai, mock_github).review(_context())
+    result = await _client(
+        _mock_openai(_no_tool_calls_response(content="The code looks problematic here.")),
+        mock_github,
+    ).review(_context())
 
     assert result.summary == "The code looks problematic here."
 
 
-# --- _parse_review_result ---
+# ---------------------------------------------------------------------------
+# Streaming: multi-chunk argument accumulation
+# ---------------------------------------------------------------------------
+
+
+async def test_streaming_arguments_split_across_chunks(mock_github: AsyncMock) -> None:
+    """Tool-call arguments that arrive across multiple chunks must be concatenated correctly."""
+    args_dict: dict[str, Any] = {"findings": [], "verdict": "approve", "summary": "LGTM"}
+    full_args = json.dumps(args_dict)
+    mid = len(full_args) // 2
+
+    chunks: list[ChatCompletionChunk] = [
+        # Chunk 1: call id + function name
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=0,
+                                id="call_1",
+                                type="function",
+                                function=ChoiceDeltaToolCallFunction(
+                                    name="submit_review", arguments=""
+                                ),
+                            )
+                        ]
+                    ),
+                    index=0,
+                    finish_reason=None,
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        ),
+        # Chunk 2: first half of arguments
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=0,
+                                function=ChoiceDeltaToolCallFunction(arguments=full_args[:mid]),
+                            )
+                        ]
+                    ),
+                    index=0,
+                    finish_reason=None,
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        ),
+        # Chunk 3: second half + finish
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=0,
+                                function=ChoiceDeltaToolCallFunction(arguments=full_args[mid:]),
+                            )
+                        ]
+                    ),
+                    index=0,
+                    finish_reason="tool_calls",
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        ),
+    ]
+
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(return_value=_MockStream(chunks))
+    result = await _client(mock_openai, mock_github).review(_context())
+
+    assert result.verdict == "approve"
+    assert result.summary == "LGTM"
+
+
+async def test_streaming_missing_id_synthesised(mock_github: AsyncMock) -> None:
+    """When a backend omits the tool-call id, a stable id is synthesised and the call proceeds."""
+    args_dict: dict[str, Any] = {"findings": [], "verdict": "approve", "summary": "ok"}
+    chunks: list[ChatCompletionChunk] = [
+        # No id field on the first chunk (some LM Studio-compatible backends omit it)
+        ChatCompletionChunk(
+            id="chunk-test",
+            choices=[
+                ChunkChoice(
+                    delta=ChoiceDelta(
+                        tool_calls=[
+                            ChoiceDeltaToolCall(
+                                index=0,
+                                function=ChoiceDeltaToolCallFunction(
+                                    name="submit_review", arguments=json.dumps(args_dict)
+                                ),
+                            )
+                        ]
+                    ),
+                    index=0,
+                    finish_reason="tool_calls",
+                    logprobs=None,
+                )
+            ],
+            created=0,
+            model="gpt-4o-mini",
+            object="chat.completion.chunk",
+        ),
+    ]
+
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(return_value=_MockStream(chunks))
+    result = await _client(mock_openai, mock_github).review(_context())
+
+    assert result.verdict == "approve"
+    assert result.summary == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _parse_review_result
+# ---------------------------------------------------------------------------
 
 
 def test_parse_unknown_severity_defaults_to_info() -> None:
@@ -326,7 +622,9 @@ def test_parse_empty_findings_list() -> None:
     assert result.summary == "LGTM"
 
 
-# --- context building includes linked issues ---
+# ---------------------------------------------------------------------------
+# context building includes linked issues
+# ---------------------------------------------------------------------------
 
 
 async def test_user_message_includes_linked_issue(mock_github: AsyncMock) -> None:
@@ -348,8 +646,7 @@ async def test_user_message_includes_linked_issue(mock_github: AsyncMock) -> Non
             )
         ],
     )
-    mock_openai = AsyncMock()
-    mock_openai.chat.completions.create = AsyncMock(return_value=_submit_response())
+    mock_openai = _mock_openai(_submit_response())
     await _client(mock_openai, mock_github).review(context)
 
     user_message = mock_openai.chat.completions.create.call_args.kwargs["messages"][1]["content"]
