@@ -17,6 +17,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
+    "qdrant-client>=1.9",
     "ruff>=0.9",
     "mypy>=1.11",
 ]

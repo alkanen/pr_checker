@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, Integer, String, Text, delete, select
 from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
-from pr_checker.models import JobStatus, PRJob, ReviewTrigger
+from pr_checker.models import IndexedBranch, JobStatus, PRJob, ReviewTrigger
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -43,8 +43,8 @@ class JobRow(Base):
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
     pr_title: Mapped[str] = mapped_column(Text, nullable=False)
     pr_body: Mapped[str | None] = mapped_column(Text, nullable=True, server_default="")
-    head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
-    base_sha: Mapped[str] = mapped_column(String(40), nullable=False)
+    head_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_sha: Mapped[str] = mapped_column(String(64), nullable=False)
     head_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     base_branch: Mapped[str] = mapped_column(String(255), nullable=False)
     trigger: Mapped[str] = mapped_column(String(30), nullable=False)
@@ -53,6 +53,24 @@ class JobRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class IndexedBranchRow(Base):
+    __tablename__ = "indexed_branches"
+
+    repo_full_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    branch: Mapped[str] = mapped_column(String(255), primary_key=True)
+    last_indexed_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    indexed_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False)
+
+
+def _row_to_indexed_branch(row: IndexedBranchRow) -> IndexedBranch:
+    return IndexedBranch(
+        repo_full_name=row.repo_full_name,
+        branch=row.branch,
+        last_indexed_sha=row.last_indexed_sha,
+        indexed_at=row.indexed_at,
+    )
 
 
 def _row_to_job(row: JobRow) -> PRJob:
@@ -85,6 +103,9 @@ class PersistenceLayer:
     async def init(self) -> None:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # Note: create_all never alters existing columns. Databases initialized before
+            # the String(64) SHA widening retain VARCHAR(40). SQLite accepts longer values
+            # silently; PostgreSQL deployments need a manual ALTER TABLE migration.
 
     async def dispose(self) -> None:
         await self._engine.dispose()
@@ -126,3 +147,39 @@ class PersistenceLayer:
         async with self._sessions() as session:
             row = await session.get(JobRow, job_id)
             return _row_to_job(row) if row is not None else None
+
+    async def upsert_indexed_branch(
+        self, repo_full_name: str, branch: str, sha: str, indexed_at: datetime
+    ) -> None:
+        async with self._sessions() as session:
+            await session.merge(
+                IndexedBranchRow(
+                    repo_full_name=repo_full_name,
+                    branch=branch,
+                    last_indexed_sha=sha,
+                    indexed_at=indexed_at,
+                )
+            )
+            await session.commit()
+
+    async def get_indexed_branch(self, repo_full_name: str, branch: str) -> IndexedBranch | None:
+        async with self._sessions() as session:
+            row = await session.get(IndexedBranchRow, (repo_full_name, branch))
+            return _row_to_indexed_branch(row) if row is not None else None
+
+    async def delete_indexed_branch(self, repo_full_name: str, branch: str) -> None:
+        async with self._sessions() as session:
+            await session.execute(
+                delete(IndexedBranchRow).where(
+                    IndexedBranchRow.repo_full_name == repo_full_name,
+                    IndexedBranchRow.branch == branch,
+                )
+            )
+            await session.commit()
+
+    async def list_indexed_branches(self, repo_full_name: str) -> list[IndexedBranch]:
+        async with self._sessions() as session:
+            result = await session.execute(
+                select(IndexedBranchRow).where(IndexedBranchRow.repo_full_name == repo_full_name)
+            )
+            return [_row_to_indexed_branch(row) for row in result.scalars()]

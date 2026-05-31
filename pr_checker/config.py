@@ -17,3 +17,7 @@ class ServerConfig(BaseSettings):
     llm_timeout: float | None = 600.0
     log_level: str = "INFO"
     log_format: str = "text"
+    qdrant_url: str = ""
+    embedding_model: str = "text-embedding-nomic-ai-nomic-embed-text-v2-moe"
+    embedding_max_tokens: int = 512
+    embedding_max_concurrent_files: int = 5

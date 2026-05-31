@@ -271,3 +271,83 @@ async def test_submit_pr_review_includes_inline_comments(
     assert sent["commit_id"] == "sha123"
     assert sent["event"] == "REQUEST_CHANGES"
     assert sent["comments"] == comments
+
+
+# --- get_branch_sha ---
+
+
+async def test_get_branch_sha(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/ref/heads/main",
+        json={"object": {"sha": "deadbeef"}},
+    )
+    sha = await github.get_branch_sha("owner/repo", "main")
+    assert sha == "deadbeef"
+
+
+async def test_get_branch_sha_url_encodes_branch(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/ref/heads/feature%2Fmy-branch",
+        json={"object": {"sha": "cafebabe"}},
+    )
+    sha = await github.get_branch_sha("owner/repo", "feature/my-branch")
+    assert sha == "cafebabe"
+
+
+# --- get_file_tree ---
+
+
+async def test_get_file_tree_returns_blob_paths(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/trees/main?recursive=1",
+        json={
+            "truncated": False,
+            "tree": [
+                {"path": "src/main.py", "type": "blob"},
+                {"path": "src", "type": "tree"},
+                {"path": "README.md", "type": "blob"},
+            ],
+        },
+    )
+    paths = await github.get_file_tree("owner/repo", "main")
+    assert paths == ["src/main.py", "README.md"]
+
+
+async def test_get_file_tree_raises_on_truncated(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/trees/main?recursive=1",
+        json={"truncated": True, "tree": [{"path": "a.py", "type": "blob"}]},
+    )
+    with pytest.raises(RuntimeError, match="truncated"):
+        await github.get_file_tree("owner/repo", "main")
+
+
+async def test_get_file_tree_url_encodes_ref(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/trees/feature%2Fmy-branch?recursive=1",
+        json={"truncated": False, "tree": [{"path": "x.py", "type": "blob"}]},
+    )
+    paths = await github.get_file_tree("owner/repo", "feature/my-branch")
+    assert paths == ["x.py"]
+
+
+async def test_get_file_tree_excludes_symlinks(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/git/trees/main?recursive=1",
+        json={
+            "truncated": False,
+            "tree": [
+                {"path": "src/main.py", "type": "blob", "mode": "100644"},
+                {"path": "link.py", "type": "blob", "mode": "120000"},  # symlink
+            ],
+        },
+    )
+    paths = await github.get_file_tree("owner/repo", "main")
+    assert paths == ["src/main.py"]
+    assert "link.py" not in paths

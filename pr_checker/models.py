@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
+_CHUNK_NS = uuid.UUID("a3b4c5d6-e7f8-1234-abcd-1234567890ab")
+
 
 class JobStatus(str, Enum):
     PENDING = "pending"
@@ -98,6 +100,39 @@ class ReviewContext:
     standards: ProjectStandards
     linked_issues: list[LinkedIssue]
     static_findings: list[StaticFinding] = field(default_factory=list)
+
+
+@dataclass
+class CodeChunk:
+    repo_full_name: str
+    branch: str
+    file_path: str
+    chunk_type: Literal["function", "class", "module_block"]
+    chunk_name: str
+    content: str
+    start_line: int
+    end_line: int
+
+    @property
+    def point_id(self) -> str:
+        # Stable identity based on location, not content: the same logical chunk
+        # (same repo/branch/file/name/start-line) always has the same point_id so
+        # that re-indexing an edited file upserts in-place rather than creating a
+        # duplicate.  Orphan points from renamed/removed chunks are handled by
+        # delete_file (incremental path) or delete_stale_generations (full re-index).
+        key = (
+            f"{self.repo_full_name}:{self.branch}:{self.file_path}"
+            f":{self.chunk_name}:{self.start_line}"
+        )
+        return str(uuid.uuid5(_CHUNK_NS, key))
+
+
+@dataclass
+class IndexedBranch:
+    repo_full_name: str
+    branch: str
+    last_indexed_sha: str
+    indexed_at: datetime
 
 
 @dataclass
