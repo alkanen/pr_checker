@@ -3,6 +3,7 @@ import logging
 import re
 import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -221,6 +222,29 @@ class GitHubClient:
             f"/repos/{repo_full_name}/pulls/{pr_number}/reviews",
             json=payload,
         )
+
+    async def get_branch_sha(self, repo_full_name: str, branch: str) -> str:
+        r = await self._get(f"/repos/{repo_full_name}/git/ref/heads/{quote(branch, safe='')}")
+        data: dict[str, Any] = r.json()
+        return str(data["object"]["sha"])
+
+    async def get_file_tree(self, repo_full_name: str, ref: str) -> list[str]:
+        """Return all blob paths under ref (branch name or commit SHA), recursively."""
+        r = await self._get(
+            f"/repos/{repo_full_name}/git/trees/{quote(ref, safe='')}",
+            params={"recursive": "1"},
+        )
+        data: dict[str, Any] = r.json()
+        if data.get("truncated"):
+            raise RuntimeError(
+                f"get_file_tree: tree for {repo_full_name}@{ref} was truncated by GitHub "
+                "(repository too large for recursive tree API)"
+            )
+        return [
+            entry["path"]
+            for entry in data.get("tree", [])
+            if entry.get("type") == "blob" and entry.get("mode") != "120000"
+        ]
 
     async def aclose(self) -> None:
         if self._http is not None:
