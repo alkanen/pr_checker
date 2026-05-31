@@ -100,6 +100,16 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
             payload: dict[str, Any] = json.loads(payload_bytes)
         except json.JSONDecodeError:
             return Response(status_code=400, content="Invalid JSON")
+
+        if payload.get("action") == "closed":
+            try:
+                repo_name = str(payload["repository"]["full_name"])
+                pr_num = int(payload["pull_request"]["number"])
+                await queue.cancel_pr(repo_name, pr_num)
+            except (KeyError, TypeError, ValueError):
+                pass
+            return Response(status_code=204)
+
         job = parse_pr_event(payload)
         if job is None:
             return Response(status_code=204)

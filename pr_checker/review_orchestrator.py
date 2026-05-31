@@ -4,8 +4,10 @@ import logging
 import time
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI
 
+from pr_checker.exceptions import StalePRError
 from pr_checker.github_client import GitHubClient
 from pr_checker.issue_resolver import IssueResolver
 from pr_checker.llm_client import MAX_STATIC_FINDINGS, LLMClient
@@ -45,6 +47,12 @@ class ReviewOrchestrator:
         _log.info(
             "Review starting: %s #%d (sha=%s)", job.repo_full_name, job.pr_number, job.head_sha[:8]
         )
+
+        current_sha = await self._github.get_pr_head_sha(job.repo_full_name, job.pr_number)
+        if current_sha != job.head_sha:
+            raise StalePRError(
+                f"PR #{job.pr_number} head moved from {job.head_sha[:8]} to {current_sha[:8]}"
+            )
 
         config = await self._config_manager.for_repo(job.repo_full_name, self._github)
 
@@ -166,29 +174,58 @@ class ReviewOrchestrator:
 
         payload = self._formatter.format(result, config)
 
-        if payload.summary_comment is not None:
-            await self._github.post_pr_comment(
-                job.repo_full_name, job.pr_number, payload.summary_comment
-            )
-            _log.info("Summary comment posted for %s #%d", job.repo_full_name, job.pr_number)
+        has_output = (
+            payload.summary_comment is not None
+            or bool(payload.inline_comments)
+            or payload.review_event is not None
+        )
+        if has_output:
+            pre_post_sha = await self._github.get_pr_head_sha(job.repo_full_name, job.pr_number)
+            if pre_post_sha != job.head_sha:
+                raise StalePRError(
+                    f"PR #{job.pr_number} head moved before posting: "
+                    f"{job.head_sha[:8]} → {pre_post_sha[:8]}"
+                )
 
-        # Submit a review whenever there is a formal verdict or inline comments to deliver.
-        # Inline comments require a review submission regardless of the formal_review flag,
-        # so they are gated on their own presence rather than on payload.review_event.
+        # Submit the commit-bound review before the unbound summary comment so that
+        # a 422 (stale commit) aborts before any comment is posted to the PR.
         if payload.inline_comments or payload.review_event is not None:
             comments: list[dict[str, Any]] = [
                 {"path": c.path, "line": c.line, "body": c.body, "side": "RIGHT"}
                 for c in payload.inline_comments
             ]
             event = payload.review_event or "COMMENT"
-            await self._github.submit_pr_review(
-                repo_full_name=job.repo_full_name,
-                pr_number=job.pr_number,
-                commit_sha=job.head_sha,
-                body=payload.review_body,
-                event=event,
-                comments=comments if comments else None,
-            )
+            try:
+                await self._github.submit_pr_review(
+                    repo_full_name=job.repo_full_name,
+                    pr_number=job.pr_number,
+                    commit_sha=job.head_sha,
+                    body=payload.review_body,
+                    event=event,
+                    comments=comments if comments else None,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 422:
+                    head_moved = False
+                    try:
+                        current_sha = await self._github.get_pr_head_sha(
+                            job.repo_full_name, job.pr_number
+                        )
+                        head_moved = current_sha != job.head_sha
+                    except Exception:
+                        _log.warning(
+                            "Could not re-check head SHA after 422 for %s #%d; "
+                            "treating as validation error",
+                            job.repo_full_name,
+                            job.pr_number,
+                            exc_info=True,
+                        )
+                    if head_moved:
+                        raise StalePRError(
+                            f"PR #{job.pr_number} review rejected (422): "
+                            f"commit {job.head_sha[:8]} is no longer the head"
+                        ) from exc
+                raise
             _log.info(
                 "Review submitted: %s, %d inline comments for %s #%d",
                 event,
@@ -196,6 +233,12 @@ class ReviewOrchestrator:
                 job.repo_full_name,
                 job.pr_number,
             )
+
+        if payload.summary_comment is not None:
+            await self._github.post_pr_comment(
+                job.repo_full_name, job.pr_number, payload.summary_comment
+            )
+            _log.info("Summary comment posted for %s #%d", job.repo_full_name, job.pr_number)
 
 
 def _estimate_tokens(context: ReviewContext) -> int:

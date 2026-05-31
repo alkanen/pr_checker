@@ -48,7 +48,13 @@ def _post_webhook(
 
 async def test_valid_pr_returns_202(client: AsyncClient, managed_app: FastAPI) -> None:
     payload = json.dumps(_pr_payload()).encode()
-    with patch.object(ReviewOrchestrator, "run", new_callable=AsyncMock):
+    with (
+        patch.object(
+            GitHubClient, "get_pr_head_sha", new_callable=AsyncMock, return_value="abc123"
+        ),
+        patch.object(GitHubClient, "post_commit_status", new_callable=AsyncMock),
+        patch.object(ReviewOrchestrator, "run", new_callable=AsyncMock),
+    ):
         r = await client.post("/webhook", **_post_webhook(payload))
         assert r.status_code == 202
         await asyncio.wait_for(managed_app.state.queue.join(), timeout=5)
@@ -90,6 +96,26 @@ async def test_pr_closed_action_returns_204(client: AsyncClient) -> None:
     assert r.status_code == 204
 
 
+async def test_pr_closed_action_calls_cancel_pr(client: AsyncClient, managed_app: FastAPI) -> None:
+    payload = json.dumps(_pr_payload("closed")).encode()
+    with patch.object(managed_app.state.queue, "cancel_pr", new_callable=AsyncMock) as mock_cancel:
+        r = await client.post("/webhook", **_post_webhook(payload))
+    assert r.status_code == 204
+    mock_cancel.assert_called_once_with("owner/repo", 1)
+
+
+async def test_pr_closed_with_non_numeric_pr_number_returns_204(client: AsyncClient) -> None:
+    payload = json.dumps(
+        {
+            "action": "closed",
+            "pull_request": {"number": "not-a-number"},
+            "repository": {"full_name": "owner/repo"},
+        }
+    ).encode()
+    r = await client.post("/webhook", **_post_webhook(payload))
+    assert r.status_code == 204
+
+
 # --- full flow ---
 
 
@@ -104,6 +130,9 @@ async def test_full_review_flow(client: AsyncClient, managed_app: FastAPI) -> No
 
     with (
         patch.object(GitHubClient, "post_commit_status", new_callable=AsyncMock) as mock_status,
+        patch.object(
+            GitHubClient, "get_pr_head_sha", new_callable=AsyncMock, return_value="abc123"
+        ),
         patch.object(ReviewOrchestrator, "run", new_callable=AsyncMock) as mock_run,
     ):
         r = await client.post("/webhook", **_post_webhook(payload))

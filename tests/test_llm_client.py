@@ -2,20 +2,24 @@ import json
 from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from openai import APITimeoutError
 from openai.types.chat import ChatCompletionMessageToolCallUnion
 from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion_chunk import (
+    ChatCompletionChunk,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
+from openai.types.chat.chat_completion_chunk import (
+    Choice as ChunkChoice,
+)
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_function_tool_call import (
     ChatCompletionMessageFunctionToolCall,
     Function,
-)
-from openai.types.chat.chat_completion_chunk import (
-    ChatCompletionChunk,
-    Choice as ChunkChoice,
-    ChoiceDelta,
-    ChoiceDeltaToolCall,
-    ChoiceDeltaToolCallFunction,
 )
 
 from pr_checker.config import ServerConfig
@@ -29,7 +33,6 @@ from pr_checker.models import (
     ReviewContext,
     Severity,
 )
-
 
 # ---------------------------------------------------------------------------
 # Streaming mock infrastructure
@@ -420,6 +423,34 @@ async def test_no_tool_calls_returns_fallback_with_system_finding(mock_github: A
     assert any(f.category == "system" for f in result.findings)
 
 
+async def test_stream_timeout_returns_fallback(mock_github: AsyncMock) -> None:
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=httpx.ReadTimeout("Request timed out")
+    )
+
+    result = await _client(mock_openai, mock_github).review(_context())
+
+    assert result.verdict == "comment"
+    assert len(result.findings) == 1
+    assert result.findings[0].category == "system"
+    assert "timed out" in result.findings[0].message
+
+
+async def test_api_timeout_error_returns_fallback(mock_github: AsyncMock) -> None:
+    mock_openai = MagicMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        side_effect=APITimeoutError(request=httpx.Request("POST", "http://test"))
+    )
+
+    result = await _client(mock_openai, mock_github).review(_context())
+
+    assert result.verdict == "comment"
+    assert len(result.findings) == 1
+    assert result.findings[0].category == "system"
+    assert "timed out" in result.findings[0].message
+
+
 async def test_no_tool_calls_surfaces_assistant_content_as_summary(
     mock_github: AsyncMock,
 ) -> None:
@@ -429,6 +460,19 @@ async def test_no_tool_calls_surfaces_assistant_content_as_summary(
     ).review(_context())
 
     assert result.summary == "The code looks problematic here."
+
+
+async def test_prose_on_last_turn_returns_fallback_with_content(
+    mock_github: AsyncMock,
+) -> None:
+    """Prose on the final turn must not be discarded via the max-turns path."""
+    result = await _client(
+        _mock_openai(_no_tool_calls_response(content="My analysis.")),
+        mock_github,
+        max_turns=1,
+    ).review(_context())
+
+    assert result.summary == "My analysis."
 
 
 # ---------------------------------------------------------------------------
