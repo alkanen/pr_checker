@@ -5,7 +5,8 @@ import logging
 import time
 from typing import Any
 
-from openai import AsyncOpenAI
+import httpx
+from openai import APITimeoutError, AsyncOpenAI
 
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import Finding, ReviewContext, ReviewResult, Severity
@@ -130,19 +131,42 @@ class LLMClient:
             {"role": "user", "content": _build_user_message(context)},
         ]
 
+        prev_prompt_chars = 0
+        reminded = False
         for turn in range(self._max_turns):
-            _log.debug(
-                "Turn %d/%d: waiting for %s (context=%d messages)",
+            prompt_chars = sum(
+                len(m["content"]) for m in messages if isinstance(m.get("content"), str)
+            )
+            initial_content = str(messages[1].get("content", "")) if len(messages) > 1 else ""
+            snippet = initial_content[:120].replace("\n", " ")
+            _log.info(
+                "Turn %d/%d: %s | %d chars (+%d), %d messages | %s",
                 turn + 1,
                 self._max_turns,
                 self._model,
+                prompt_chars,
+                prompt_chars - prev_prompt_chars,
                 len(messages),
+                snippet,
             )
+            prev_prompt_chars = prompt_chars
 
-            content, tool_calls, finish_reason, elapsed = await self._stream_turn(messages, turn)
+            try:
+                content, tool_calls, finish_reason, elapsed = await self._stream_turn(
+                    messages, turn
+                )
+            except (httpx.TimeoutException, APITimeoutError) as exc:
+                _log.warning(
+                    "LLM stream timed out on turn %d/%d (model=%s): %s",
+                    turn + 1,
+                    self._max_turns,
+                    self._model,
+                    exc,
+                )
+                return _fallback_result("LLM request timed out; review incomplete.")
 
             if tool_calls:
-                _log.debug(
+                _log.info(
                     "Turn %d/%d completed in %.1fs: tools=[%s]",
                     turn + 1,
                     self._max_turns,
@@ -166,6 +190,37 @@ class LLMClient:
             messages.append(msg)
 
             if not tool_calls:
+                if content and not reminded and turn < self._max_turns - 1:
+                    # Strip intermediate tool exchanges: keep only the system
+                    # prompt, the initial PR diff, and the model's prose so it
+                    # can convert its analysis into a submit_review call without
+                    # being weighed down by the full history.
+                    prose_msg = messages[-1]
+                    dropped = len(messages) - 3  # system + initial_user + prose
+                    messages = [
+                        messages[0],
+                        messages[1],
+                        prose_msg,
+                        {
+                            "role": "user",
+                            "content": (
+                                "The intermediate tool-call history has been trimmed"
+                                " to reduce context size. Your analysis above contains"
+                                " your findings. Please call `submit_review` now with"
+                                " those findings."
+                            ),
+                        },
+                    ]
+                    _log.warning(
+                        "Turn %d/%d: model gave prose but no tool call (model=%s); "
+                        "trimmed %d intermediate messages and sending submit_review reminder",
+                        turn + 1,
+                        self._max_turns,
+                        self._model,
+                        dropped,
+                    )
+                    reminded = True
+                    continue
                 _log.warning(
                     "LLM did not call submit_review on turn %d (model=%s); fallback result",
                     turn + 1,
@@ -178,20 +233,20 @@ class LLMClient:
                 args: dict[str, Any] = json.loads(tool_call["function"]["arguments"])
 
                 if name == "submit_review":
-                    _log.debug(
+                    _log.info(
                         "Tool call: submit_review(verdict=%s, findings=%d)",
                         args.get("verdict", "?"),
                         len(args.get("findings", [])),
                     )
                     return _parse_review_result(args)
 
-                _log.debug(
+                _log.info(
                     "Tool call: %s(%s)", name, _truncate(json.dumps(args, ensure_ascii=False))
                 )
                 t1 = time.monotonic()
                 result_text = await self._dispatch_tool(name, args)
                 elapsed_ms = int((time.monotonic() - t1) * 1000)
-                _log.debug("Tool result: %s -> %d chars (%dms)", name, len(result_text), elapsed_ms)
+                _log.info("Tool result: %s -> %d chars (%dms)", name, len(result_text), elapsed_ms)
                 messages.append(
                     {"role": "tool", "tool_call_id": tool_call["id"], "content": result_text}
                 )
@@ -254,7 +309,7 @@ class LLMClient:
 
                 now = time.monotonic()
                 if now - t_last_log >= _STREAM_LOG_INTERVAL:
-                    _log.debug(
+                    _log.info(
                         "Streaming turn %d/%d: %d chunks, %.0fs elapsed (model=%s)",
                         turn + 1,
                         self._max_turns,

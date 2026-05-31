@@ -180,6 +180,11 @@ class GitHubClient:
             return base64.b64decode(content).decode("utf-8", errors="replace")
         return str(content)
 
+    async def get_pr_head_sha(self, repo_full_name: str, pr_number: int) -> str:
+        r = await self._get(f"/repos/{repo_full_name}/pulls/{pr_number}")
+        data: dict[str, Any] = r.json()
+        return str(data["head"]["sha"])
+
     async def get_default_branch(self, repo_full_name: str) -> str:
         r = await self._get(f"/repos/{repo_full_name}")
         data: dict[str, Any] = r.json()

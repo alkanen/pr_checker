@@ -10,6 +10,7 @@ class JobStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class ReviewTrigger(str, Enum):
@@ -116,3 +117,4 @@ class PRJob:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    superseded: bool = False

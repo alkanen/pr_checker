@@ -9,20 +9,23 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from openai.types.chat import ChatCompletionMessageToolCallUnion
 from openai.types.chat.chat_completion import ChatCompletion, Choice
+from openai.types.chat.chat_completion_chunk import (
+    ChatCompletionChunk,
+    ChoiceDelta,
+    ChoiceDeltaToolCall,
+    ChoiceDeltaToolCallFunction,
+)
+from openai.types.chat.chat_completion_chunk import (
+    Choice as ChunkChoice,
+)
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.chat.chat_completion_message_function_tool_call import (
     ChatCompletionMessageFunctionToolCall,
     Function,
 )
-from openai.types.chat.chat_completion_chunk import (
-    ChatCompletionChunk,
-    Choice as ChunkChoice,
-    ChoiceDelta,
-    ChoiceDeltaToolCall,
-    ChoiceDeltaToolCallFunction,
-)
 from pytest_httpx import HTTPXMock
 
+from pr_checker.exceptions import StalePRError
 from pr_checker.github_client import GitHubClient
 from pr_checker.issue_resolver import IssueResolver
 from pr_checker.llm_client import LLMClient
@@ -211,6 +214,13 @@ def _stream_from_response(response: ChatCompletion) -> _MockStream:
     return _MockStream(chunks)
 
 
+def _mock_pr_head_sha(httpx_mock: HTTPXMock, sha: str = "abc123") -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/1",
+        json={"head": {"sha": sha}},
+    )
+
+
 def _mock_github_repo(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url="https://api.github.com/repos/owner/repo",
@@ -267,6 +277,8 @@ def _mock_file_content(httpx_mock: HTTPXMock, path: str = "main.py", sha: str = 
 async def test_full_pipeline_posts_summary_and_formal_review(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -300,6 +312,8 @@ async def test_summary_comment_not_posted_when_disabled(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
     # for_repo is patched so no GitHub repo/config HTTP calls are made
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_pr_diff(httpx_mock)
     _mock_submit_review(httpx_mock)
 
@@ -341,6 +355,8 @@ async def test_inline_comments_posted_when_formal_review_disabled(
 ) -> None:
     """Inline comments are delivered via a COMMENT review even when formal_review=False."""
     # for_repo is patched so no GitHub repo/config HTTP calls are made
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_pr_diff(httpx_mock)
     _mock_post_pr_comment(httpx_mock)
     _mock_submit_review(httpx_mock)
@@ -387,6 +403,8 @@ async def test_inline_comments_posted_when_formal_review_disabled(
 async def test_model_manager_used_when_provided(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -421,6 +439,7 @@ async def test_no_review_submitted_when_all_output_disabled(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
     # for_repo is patched so no GitHub repo/config HTTP calls are made
+    _mock_pr_head_sha(httpx_mock)
     _mock_pr_diff(httpx_mock)
 
     mock_openai = AsyncMock()
@@ -457,6 +476,8 @@ async def test_no_review_submitted_when_all_output_disabled(
 async def test_formatter_called_with_review_result(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -503,6 +524,8 @@ async def test_formatter_called_with_review_result(
 async def test_llm_client_receives_correct_repo_and_sha(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock, sha="deadbeef")  # pre-flight
+    _mock_pr_head_sha(httpx_mock, sha="deadbeef")  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -546,6 +569,8 @@ async def test_llm_client_receives_correct_repo_and_sha(
 async def test_static_findings_passed_to_llm_context(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -596,6 +621,8 @@ async def test_static_findings_passed_to_llm_context(
 async def test_static_analyzer_failure_does_not_block_review(
     github: GitHubClient, httpx_mock: HTTPXMock
 ) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight
+    _mock_pr_head_sha(httpx_mock)  # pre-output
     _mock_github_repo(httpx_mock)
     _mock_pr_checker_yml_absent(httpx_mock)
     _mock_pr_diff(httpx_mock)
@@ -627,3 +654,158 @@ async def test_static_analyzer_failure_does_not_block_review(
     requests = httpx_mock.get_requests()
     urls = [str(r.url) for r in requests]
     assert any("pulls/1/reviews" in u for u in urls)
+
+
+# --- pre-flight SHA check ---
+
+
+async def test_stale_sha_raises_stale_pr_error(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    _mock_pr_head_sha(httpx_mock, sha="newsha99")  # current head differs from job's sha
+
+    mock_openai = AsyncMock()
+
+    orchestrator = ReviewOrchestrator(
+        github=github,
+        config_manager=ConfigManager(),
+        standards_detector=StandardsDetector(github),
+        issue_resolver=IssueResolver(github, llm=None),
+        model_manager=None,
+        openai=mock_openai,
+    )
+
+    with pytest.raises(StalePRError):
+        await orchestrator.run(_job(head_sha="abc123"))  # abc123 != newsha99
+
+    mock_openai.chat.completions.create.assert_not_called()
+
+
+async def test_matching_sha_proceeds_to_review(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    _mock_pr_head_sha(httpx_mock, sha="abc123")  # pre-flight
+    _mock_pr_head_sha(httpx_mock, sha="abc123")  # pre-output
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+    _mock_post_pr_comment(httpx_mock)
+    _mock_submit_review(httpx_mock)
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
+
+    with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+        )
+        await orchestrator.run(_job(head_sha="abc123"))
+
+    mock_openai.chat.completions.create.assert_called_once()
+
+
+async def test_stale_submit_422_raises_stale_pr_error(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    _mock_pr_head_sha(httpx_mock)  # pre-flight: abc123 matches
+    _mock_pr_head_sha(httpx_mock)  # pre-output: abc123 matches, proceed to post
+    _mock_pr_head_sha(httpx_mock, sha="newsha99")  # 422 re-check: head moved
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/1/reviews",
+        method="POST",
+        status_code=422,
+        json={"message": "Reference does not exist"},
+    )
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
+
+    with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+        )
+        with pytest.raises(StalePRError):
+            await orchestrator.run(_job())
+
+
+async def test_submit_422_validation_error_reraises(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    """A 422 where the head SHA has NOT moved is a validation error, not a stale PR."""
+    import httpx as _httpx
+
+    _mock_pr_head_sha(httpx_mock)  # pre-flight: abc123 matches
+    _mock_pr_head_sha(httpx_mock)  # pre-output: abc123 matches, proceed to post
+    _mock_pr_head_sha(httpx_mock)  # 422 re-check: still abc123 — head did not move
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/1/reviews",
+        method="POST",
+        status_code=422,
+        json={"message": "Invalid line position"},
+    )
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
+
+    with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+        )
+        with pytest.raises(_httpx.HTTPStatusError):
+            await orchestrator.run(_job())
+
+
+async def test_head_moved_before_posting_raises_stale_pr_error(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    """Pre-output SHA check fires even when only a summary comment would be posted."""
+    _mock_pr_head_sha(httpx_mock, sha="abc123")  # pre-flight: matches
+    _mock_pr_head_sha(httpx_mock, sha="newsha99")  # pre-output: head moved
+    _mock_github_repo(httpx_mock)
+    _mock_pr_checker_yml_absent(httpx_mock)
+    _mock_pr_diff(httpx_mock)
+
+    mock_openai = AsyncMock()
+    mock_openai.chat.completions.create = AsyncMock(
+        return_value=_stream_from_response(_submit_review_response())
+    )
+
+    with patch.object(StandardsDetector, "detect", return_value=ProjectStandards()):
+        orchestrator = ReviewOrchestrator(
+            github=github,
+            config_manager=ConfigManager(),
+            standards_detector=StandardsDetector(github),
+            issue_resolver=IssueResolver(github, llm=None),
+            model_manager=None,
+            openai=mock_openai,
+        )
+        with pytest.raises(StalePRError):
+            await orchestrator.run(_job(head_sha="abc123"))
+
+    requests = httpx_mock.get_requests()
+    urls = [str(r.url) for r in requests]
+    assert not any("issues/1/comments" in u for u in urls)
+    assert not any("pulls/1/reviews" in u for u in urls)

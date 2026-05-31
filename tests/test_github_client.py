@@ -213,6 +213,18 @@ async def test_get_issue_null_body_becomes_empty_string(
     assert issue.body == ""
 
 
+# --- get_pr_head_sha ---
+
+
+async def test_get_pr_head_sha(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url="https://api.github.com/repos/owner/repo/pulls/7",
+        json={"head": {"sha": "deadbeef123"}},
+    )
+    sha = await github.get_pr_head_sha("owner/repo", 7)
+    assert sha == "deadbeef123"
+
+
 # --- submit_pr_review ---
 
 
