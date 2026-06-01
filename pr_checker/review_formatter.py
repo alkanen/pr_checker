@@ -51,6 +51,7 @@ class ReviewFormatter:
                             body=_format_finding(finding),
                         )
                     )
+            payload.inline_comments.sort(key=lambda c: (c.path, c.line))
 
         if config.output.summary_comment:
             payload.summary_comment = _build_summary(result)
@@ -79,11 +80,7 @@ def _build_summary(result: ReviewResult) -> str:
         lines.append("\n### Findings\n")
         sorted_findings = sorted(
             result.findings,
-            key=lambda f: (
-                _SEVERITY_ORDER.index(f.severity.value)
-                if f.severity.value in _SEVERITY_ORDER
-                else len(_SEVERITY_ORDER)
-            ),
+            key=lambda f: f.severity.value,
         )
         for f in sorted_findings:
             emoji = _SEVERITY_EMOJI.get(f.severity, "")

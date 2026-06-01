@@ -35,7 +35,7 @@ class _JsonFormatter(logging.Formatter):
         obj: dict[str, object] = {
             "ts": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "level": record.levelname,
-            "logger": record.name,
+            "logger": record.module,
             "msg": record.getMessage(),
         }
         job_id = getattr(record, "job_id", "")
@@ -43,6 +43,8 @@ class _JsonFormatter(logging.Formatter):
             obj["job_id"] = job_id
         if record.exc_info:
             obj["exc"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            obj["stack"] = self.formatStack(record.stack_info)
         return json.dumps(obj, ensure_ascii=False)
 
 

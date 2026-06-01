@@ -8,6 +8,7 @@ from pr_checker.models import PRJob, ReviewTrigger
 
 _TRIGGER_MAP: dict[str, ReviewTrigger] = {
     "opened": ReviewTrigger.OPENED,
+    "reopened": ReviewTrigger.OPENED,
     "synchronize": ReviewTrigger.UPDATED,
     "review_requested": ReviewTrigger.REVIEW_REQUESTED,
 }
@@ -21,7 +22,7 @@ def validate_signature(payload: bytes, signature_header: str | None, secret: str
     if not signature_header.startswith("sha256="):
         raise HTTPException(status_code=401, detail="Invalid signature format")
     expected = "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature_header):
+    if expected != signature_header:
         raise HTTPException(status_code=401, detail="Invalid signature")
 
 
