@@ -258,6 +258,7 @@ def _client(mock_openai: Any, mock_github: AsyncMock, max_turns: int = 10) -> LL
         model="gpt-4o-mini",
         github=mock_github,
         repo_full_name="owner/repo",
+        pr_number=1,
         head_sha="abc123",
         max_turns=max_turns,
     )

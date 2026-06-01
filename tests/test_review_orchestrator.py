@@ -75,7 +75,7 @@ def _submit_review_response(
                 "category": "logic",
                 "message": "Deliberate bug",
                 "file_path": "main.py",
-                "line_number": 4,
+                "line_number": 2,
             }
         ],
         "verdict": verdict,

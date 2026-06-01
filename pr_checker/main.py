@@ -65,6 +65,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         openai=openai_client,
         model_override=cfg.llm_model or None,
         static_analyzer=StaticAnalyzer(),
+        debug_dir=Path(cfg.llm_debug_dir) if cfg.llm_debug_dir else None,
     )
     queue = ReviewQueue(persistence, github, orchestrator)
 
