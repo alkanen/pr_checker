@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, NoReturn
 
 import httpx
 from openai import AsyncOpenAI
@@ -32,6 +33,7 @@ class ReviewOrchestrator:
         openai: AsyncOpenAI,
         model_override: str | None = None,
         static_analyzer: StaticAnalyzer | None = None,
+        debug_dir: Path | None = None,
     ) -> None:
         self._github = github
         self._config_manager = config_manager
@@ -41,6 +43,7 @@ class ReviewOrchestrator:
         self._openai = openai
         self._model_override = model_override
         self._static_analyzer = static_analyzer
+        self._debug_dir = debug_dir
         self._formatter = ReviewFormatter()
 
     async def run(self, job: PRJob) -> None:
@@ -158,7 +161,9 @@ class ReviewOrchestrator:
             model=model_id,
             github=self._github,
             repo_full_name=job.repo_full_name,
+            pr_number=job.pr_number,
             head_sha=job.head_sha,
+            debug_dir=self._debug_dir,
         )
 
         t2 = time.monotonic()
@@ -173,6 +178,27 @@ class ReviewOrchestrator:
         )
 
         payload = self._formatter.format(result, config)
+
+        # GitHub's review API returns 422 for any comment whose line is not part of
+        # the diff context.  Filter to right-side lines that actually appear in the
+        # diff so a single out-of-range finding doesn't abort the whole review.
+        if payload.inline_comments:
+            valid_diff_lines: set[tuple[str, int]] = {
+                (hunk.file_path, line.new_lineno)
+                for hunk in hunks
+                for line in hunk.lines
+                if line.new_lineno is not None
+            }
+            valid = [c for c in payload.inline_comments if (c.path, c.line) in valid_diff_lines]
+            dropped = len(payload.inline_comments) - len(valid)
+            if dropped:
+                _log.info(
+                    "Dropped %d inline comment(s) outside the diff for %s #%d",
+                    dropped,
+                    job.repo_full_name,
+                    job.pr_number,
+                )
+            payload.inline_comments = valid
 
         has_output = (
             payload.summary_comment is not None
@@ -195,37 +221,53 @@ class ReviewOrchestrator:
                 for c in payload.inline_comments
             ]
             event = payload.review_event or "COMMENT"
+            # GitHub requires a non-empty body for all non-APPROVE review events.
+            # Guard against LLMs that omit or blank out the summary field.
+            review_body = payload.review_body.strip()
+            if event != "APPROVE" and not review_body:
+                review_body = "Review complete — see inline comments and findings above."
             try:
                 await self._github.submit_pr_review(
                     repo_full_name=job.repo_full_name,
                     pr_number=job.pr_number,
                     commit_sha=job.head_sha,
-                    body=payload.review_body,
+                    body=review_body,
                     event=event,
                     comments=comments if comments else None,
                 )
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 422:
-                    head_moved = False
+                if exc.response.status_code != 422:
+                    raise
+                _log.warning(
+                    "422 from GitHub reviews API for %s #%d: %s",
+                    job.repo_full_name,
+                    job.pr_number,
+                    exc.response.text,
+                )
+                # GitHub forbids REQUEST_CHANGES on your own PR. Retry as COMMENT
+                # so the findings are still posted when reviewer == PR author.
+                if event == "REQUEST_CHANGES" and "own pull request" in exc.response.text:
+                    _log.info(
+                        "Retrying review as COMMENT (reviewer is PR author) for %s #%d",
+                        job.repo_full_name,
+                        job.pr_number,
+                    )
+                    event = "COMMENT"
                     try:
-                        current_sha = await self._github.get_pr_head_sha(
-                            job.repo_full_name, job.pr_number
+                        await self._github.submit_pr_review(
+                            repo_full_name=job.repo_full_name,
+                            pr_number=job.pr_number,
+                            commit_sha=job.head_sha,
+                            body=review_body,
+                            event=event,
+                            comments=comments if comments else None,
                         )
-                        head_moved = current_sha != job.head_sha
-                    except Exception:
-                        _log.warning(
-                            "Could not re-check head SHA after 422 for %s #%d; "
-                            "treating as validation error",
-                            job.repo_full_name,
-                            job.pr_number,
-                            exc_info=True,
-                        )
-                    if head_moved:
-                        raise StalePRError(
-                            f"PR #{job.pr_number} review rejected (422): "
-                            f"commit {job.head_sha[:8]} is no longer the head"
-                        ) from exc
-                raise
+                    except httpx.HTTPStatusError as retry_exc:
+                        if retry_exc.response.status_code == 422:
+                            await self._raise_stale_or_reraise(retry_exc, job, "retry")
+                        raise
+                else:
+                    await self._raise_stale_or_reraise(exc, job)
             _log.info(
                 "Review submitted: %s, %d inline comments for %s #%d",
                 event,
@@ -239,6 +281,33 @@ class ReviewOrchestrator:
                 job.repo_full_name, job.pr_number, payload.summary_comment
             )
             _log.info("Summary comment posted for %s #%d", job.repo_full_name, job.pr_number)
+
+    async def _raise_stale_or_reraise(
+        self,
+        exc: httpx.HTTPStatusError,
+        job: PRJob,
+        context: str = "",
+    ) -> NoReturn:
+        """Check whether the PR head moved; raise StalePRError if so, else re-raise exc."""
+        head_moved = False
+        label = f" ({context})" if context else ""
+        try:
+            current_sha = await self._github.get_pr_head_sha(job.repo_full_name, job.pr_number)
+            head_moved = current_sha != job.head_sha
+        except Exception:
+            _log.warning(
+                "Could not re-check head SHA after 422%s for %s #%d; treating as validation error",
+                label,
+                job.repo_full_name,
+                job.pr_number,
+                exc_info=True,
+            )
+        if head_moved:
+            raise StalePRError(
+                f"PR #{job.pr_number} review rejected (422): "
+                f"commit {job.head_sha[:8]} is no longer the head"
+            ) from exc
+        raise exc
 
 
 def _estimate_tokens(context: ReviewContext) -> int:

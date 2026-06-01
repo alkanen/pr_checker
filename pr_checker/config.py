@@ -21,3 +21,4 @@ class ServerConfig(BaseSettings):
     embedding_model: str = "text-embedding-nomic-ai-nomic-embed-text-v2-moe"
     embedding_max_tokens: int = 512
     embedding_max_concurrent_files: int = 5
+    llm_debug_dir: str = ""

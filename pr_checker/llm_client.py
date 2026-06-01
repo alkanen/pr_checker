@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -115,15 +117,19 @@ class LLMClient:
         model: str,
         github: GitHubClient,
         repo_full_name: str,
+        pr_number: int,
         head_sha: str,
         max_turns: int = DEFAULT_MAX_TURNS,
+        debug_dir: Path | None = None,
     ) -> None:
         self._openai = openai
         self._model = model
         self._github = github
         self._repo = repo_full_name
+        self._pr_number = pr_number
         self._sha = head_sha
         self._max_turns = max_turns
+        self._debug_dir = debug_dir
 
     async def review(self, context: ReviewContext) -> ReviewResult:
         messages: list[Any] = [
@@ -133,6 +139,7 @@ class LLMClient:
 
         prev_prompt_chars = 0
         reminded = False
+        force_submit = False
         for turn in range(self._max_turns):
             prompt_chars = sum(
                 len(m["content"]) for m in messages if isinstance(m.get("content"), str)
@@ -151,9 +158,15 @@ class LLMClient:
             )
             prev_prompt_chars = prompt_chars
 
+            tool_choice: Any = (
+                {"type": "function", "function": {"name": "submit_review"}}
+                if force_submit
+                else "auto"
+            )
+            force_submit = False
             try:
                 content, tool_calls, finish_reason, elapsed = await self._stream_turn(
-                    messages, turn
+                    messages, turn, tool_choice=tool_choice
                 )
             except (httpx.TimeoutException, APITimeoutError) as exc:
                 _log.warning(
@@ -163,6 +176,7 @@ class LLMClient:
                     self._model,
                     exc,
                 )
+                self._dump_messages(messages)
                 return _fallback_result("LLM request timed out; review incomplete.")
 
             if tool_calls:
@@ -190,47 +204,89 @@ class LLMClient:
             messages.append(msg)
 
             if not tool_calls:
-                if content and not reminded and turn < self._max_turns - 1:
-                    # Strip intermediate tool exchanges: keep only the system
-                    # prompt, the initial PR diff, and the model's prose so it
-                    # can convert its analysis into a submit_review call without
-                    # being weighed down by the full history.
-                    prose_msg = messages[-1]
-                    dropped = len(messages) - 3  # system + initial_user + prose
-                    messages = [
-                        messages[0],
-                        messages[1],
-                        prose_msg,
-                        {
-                            "role": "user",
-                            "content": (
-                                "The intermediate tool-call history has been trimmed"
-                                " to reduce context size. Your analysis above contains"
-                                " your findings. Please call `submit_review` now with"
-                                " those findings."
-                            ),
-                        },
-                    ]
+                if not reminded and turn < self._max_turns - 1:
+                    if content:
+                        # Strip intermediate tool exchanges: keep only the system
+                        # prompt, the initial PR diff, and the model's prose so it
+                        # can convert its analysis into a submit_review call without
+                        # being weighed down by the full history.
+                        prose_msg = messages[-1]
+                        dropped = len(messages) - 3  # system + initial_user + prose
+                        reminder = (
+                            "The intermediate tool-call history has been trimmed"
+                            " to reduce context size. Your analysis above contains"
+                            " your findings. Please call `submit_review` now with"
+                            " those findings."
+                        )
+                        messages = [
+                            messages[0],
+                            messages[1],
+                            prose_msg,
+                            {"role": "user", "content": reminder},
+                        ]
+                        kind = "prose"
+                    else:
+                        # Model returned a completely empty response — drop it and
+                        # prompt directly without any intermediate history.
+                        dropped = len(messages) - 2  # system + initial_user only
+                        reminder = (
+                            "You did not provide a response. Please call `submit_review`"
+                            " now with your findings based on the diff."
+                        )
+                        messages = [messages[0], messages[1], {"role": "user", "content": reminder}]
+                        kind = "empty response"
                     _log.warning(
-                        "Turn %d/%d: model gave prose but no tool call (model=%s); "
+                        "Turn %d/%d: model gave %s but no tool call (model=%s); "
                         "trimmed %d intermediate messages and sending submit_review reminder",
                         turn + 1,
                         self._max_turns,
+                        kind,
                         self._model,
                         dropped,
                     )
                     reminded = True
+                    force_submit = True
                     continue
                 _log.warning(
                     "LLM did not call submit_review on turn %d (model=%s); fallback result",
                     turn + 1,
                     self._model,
                 )
+                self._dump_messages(messages)
                 return _fallback_result("Model did not call submit_review.", content or "")
 
             for tool_call in tool_calls:
                 name = tool_call["function"]["name"]
-                args: dict[str, Any] = json.loads(tool_call["function"]["arguments"])
+                raw_args = tool_call["function"]["arguments"]
+                bad_args: str | None = None
+                try:
+                    parsed = json.loads(raw_args) if raw_args else {}
+                    if not isinstance(parsed, dict):
+                        bad_args = f"expected JSON object, got {type(parsed).__name__}"
+                    else:
+                        args: dict[str, Any] = parsed
+                except json.JSONDecodeError as json_exc:
+                    bad_args = str(json_exc)
+                if bad_args is not None:
+                    _log.warning(
+                        "Bad arguments in tool call %r (model=%s): %s",
+                        name,
+                        self._model,
+                        bad_args,
+                    )
+                    if name == "submit_review":
+                        # Forced call produced unparseable arguments — give up rather
+                        # than looping with force_submit cleared.
+                        self._dump_messages(messages)
+                        return _fallback_result("submit_review called with malformed arguments.")
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call["id"],
+                            "content": f"Error: could not parse tool arguments — {bad_args}",
+                        }
+                    )
+                    continue
 
                 if name == "submit_review":
                     _log.info(
@@ -256,14 +312,29 @@ class LLMClient:
             self._max_turns,
             self._model,
         )
+        self._dump_messages(messages)
         return _fallback_result(
             f"Review exceeded the maximum tool-call turn limit ({self._max_turns})."
         )
+
+    def _dump_messages(self, messages: list[Any]) -> None:
+        if self._debug_dir is None:
+            return
+        owner, repo = self._repo.split("/", 1)
+        filename = f"{owner}__{repo}__{self._pr_number}__{self._sha}.json"
+        path = self._debug_dir / filename
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
+            _log.info("LLM message history dumped to %s", path)
+        except Exception:
+            _log.warning("Failed to write LLM debug dump to %s", path, exc_info=True)
 
     async def _stream_turn(
         self,
         messages: list[Any],
         turn: int,
+        tool_choice: Any = "auto",
     ) -> tuple[str | None, list[dict[str, Any]], str | None, float]:
         """Stream one LLM turn; accumulate deltas and return (content, tool_calls, finish, elapsed).
 
@@ -271,6 +342,7 @@ class LLMClient:
         This covers slow time-to-first-token on CPU-only backends as well as stalls mid-stream.
         """
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
         chunk_count = 0
@@ -281,7 +353,7 @@ class LLMClient:
             model=self._model,
             messages=messages,
             tools=_TOOLS,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             stream=True,
         ) as stream:
             async for chunk in stream:
@@ -294,6 +366,12 @@ class LLMClient:
                 delta = choice.delta
                 if delta.content:
                     content_parts.append(delta.content)
+                # Qwen3 and other thinking models stream reasoning in a non-standard
+                # reasoning_content field rather than content.  Capture it so we can
+                # use it as a fallback when content is empty.
+                reasoning = getattr(delta, "reasoning_content", None)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -321,6 +399,17 @@ class LLMClient:
 
         elapsed = time.monotonic() - t0
         content = "".join(content_parts) or None
+        if not content and reasoning_parts:
+            # Thinking model: all output went to reasoning_content, visible content is empty.
+            # Promote reasoning so the reminder path can pass it back as context.
+            content = "".join(reasoning_parts)
+            _log.debug(
+                "Turn %d/%d: promoted reasoning_content to content (%d chars, model=%s)",
+                turn + 1,
+                self._max_turns,
+                len(content),
+                self._model,
+            )
         tool_calls: list[dict[str, Any]] = []
         for idx, acc in sorted(tool_calls_acc.items()):
             if not acc["name"]:
@@ -342,19 +431,44 @@ class LLMClient:
                     "function": {"name": acc["name"], "arguments": acc["arguments"]},
                 }
             )
+        # Some model builds emit tool calls as <tool_call> markup in text rather
+        # than structured tool_calls — parse and promote them transparently.
+        if not tool_calls and content and "<tool_call>" in content:
+            parsed = _parse_text_tool_calls(content)
+            if parsed:
+                _log.warning(
+                    "Turn %d/%d: extracted %d text-based tool call(s) from content (model=%s); "
+                    "model template does not emit structured tool_calls",
+                    turn + 1,
+                    self._max_turns,
+                    len(parsed),
+                    self._model,
+                )
+                tool_calls = parsed
+                content = (
+                    re.sub(r"\s*<tool_call>.*?</tool_call>", "", content, flags=re.DOTALL).strip()
+                    or None
+                )
+
         return content, tool_calls, finish_reason, elapsed
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> str:
-        if name == "get_code_snippet":
-            return await self._get_code_snippet(args)
-        if name == "search_code":
-            # stub — wired to Qdrant in Phase 7
-            return "[]"
-        _log.warning("Unknown tool called: %s", name)
-        return f"Unknown tool: {name}"
+        try:
+            if name == "get_code_snippet":
+                return await self._get_code_snippet(args)
+            if name == "search_code":
+                # stub — wired to Qdrant in Phase 7
+                return "[]"
+            _log.warning("Unknown tool called: %s", name)
+            return f"Unknown tool: {name}"
+        except Exception as exc:
+            _log.warning("Tool %s raised an unexpected error: %s", name, exc, exc_info=True)
+            return f"Error: tool {name} failed ({exc})"
 
     async def _get_code_snippet(self, args: dict[str, Any]) -> str:
-        file_path: str = args["file_path"]
+        file_path = args.get("file_path")
+        if not file_path:
+            return "Error: get_code_snippet requires a file_path argument."
         start: int = max(1, int(args.get("start_line", 1)))
         end: int = int(args.get("end_line", start + _MAX_SNIPPET_LINES - 1))
         end = max(start, min(end, start + _MAX_SNIPPET_LINES - 1))
@@ -368,6 +482,60 @@ class LLMClient:
         lines = content.splitlines()
         snippet = "\n".join(lines[start - 1 : end])
         return f"```\n{snippet}\n```"
+
+
+def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Parse <tool_call> markup from text content into structured tool call dicts.
+
+    Handles two formats emitted by models whose chat template lacks native tool-call
+    support:
+
+    Format 1 — JSON body:
+        <tool_call>
+        {"name": "fn", "arguments": {"k": "v"}}
+        </tool_call>
+
+    Format 2 — function/parameter XML (Qwen3 LM Studio template):
+        <tool_call>
+        <function=fn_name>
+        <parameter>key>value</parameter>
+        </function>
+        </tool_call>
+    """
+    result: list[dict[str, Any]] = []
+    for block in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL):
+        inner = block.group(1).strip()
+        if inner.startswith("{"):
+            try:
+                obj = json.loads(inner)
+                name = obj.get("name") or (obj.get("function") or {}).get("name")
+                args = obj.get("arguments") or obj.get("parameters") or {}
+                if name:
+                    result.append(
+                        {
+                            "id": f"text_{len(result)}",
+                            "type": "function",
+                            "function": {"name": str(name), "arguments": json.dumps(args)},
+                        }
+                    )
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        else:
+            fn_match = re.search(r"<function=(\w+)>", inner)
+            if not fn_match:
+                continue
+            fn_name = fn_match.group(1)
+            params: dict[str, str] = {}
+            for pm in re.finditer(r"<parameter>(\w+)>\s*(.*?)\s*</parameter>", inner, re.DOTALL):
+                params[pm.group(1)] = pm.group(2).strip()
+            result.append(
+                {
+                    "id": f"text_{len(result)}",
+                    "type": "function",
+                    "function": {"name": fn_name, "arguments": json.dumps(params)},
+                }
+            )
+    return result
 
 
 def _fallback_result(reason: str, assistant_content: str = "") -> ReviewResult:
