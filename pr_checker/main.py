@@ -37,7 +37,11 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
 
     persistence = PersistenceLayer(cfg.database_url)
     github = GitHubClient(cfg.github_token)
-    config_manager = ConfigManager(Path(cfg.config_file) if cfg.config_file else None)
+    config_manager = ConfigManager(
+        config_file=Path(cfg.config_file) if cfg.config_file else None,
+        max_prefetch_chunks=cfg.max_prefetch_chunks,
+        max_search_chunks_per_call=cfg.max_search_chunks_per_call,
+    )
     standards_detector = StandardsDetector(github)
 
     openai_client = AsyncOpenAI(

@@ -1,42 +1,46 @@
 import ast
 import logging
 from pathlib import Path
-from typing import Literal
 
-from pr_checker.models import CodeChunk
+from pr_checker.models import ChunkType, CodeChunk
 
 _log = logging.getLogger(__name__)
 
 _PYTHON_EXT = ".py"
-_SOURCE_EXTS = {
-    ".py",
-    ".js",
-    ".ts",
-    ".jsx",
-    ".tsx",
-    ".mjs",
-    ".cjs",
-    ".go",
-    ".rs",
-    ".java",
-    ".rb",
-    ".cs",
-    ".cpp",
-    ".cc",
-    ".c",
-    ".h",
-    ".hpp",
-    ".kt",
-    ".swift",
-    ".scala",
-    ".php",
-    ".lua",
+
+LANG_EXT: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".jsx": "javascript",
+    ".tsx": "typescript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".rb": "ruby",
+    ".cs": "csharp",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp",
+    ".cu": "cuda",
+    ".cuh": "cuda",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".php": "php",
+    ".lua": "lua",
+    ".sh": "bash",
 }
+
+_DISPLAY_ONLY_EXTS = {".sh"}
+_SOURCE_EXTS = set(LANG_EXT.keys()) - _DISPLAY_ONLY_EXTS
 
 _CHARS_PER_LINE = 80  # assumed average for source code; used only for heuristic chunker sizing
 _OVERLAP_FRACTION = 6  # overlap ≈ chunk_lines // _OVERLAP_FRACTION (~16%)
-
-ChunkType = Literal["function", "class", "module_block"]
 
 _DecorableNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 

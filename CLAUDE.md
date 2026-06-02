@@ -51,6 +51,8 @@ Start the dev server:
 | `EMBEDDING_MODEL` | Embedding model name passed to the configured OpenAI-compatible endpoint (default `text-embedding-nomic-ai-nomic-embed-text-v2-moe`). Used when `QDRANT_URL` is set. |
 | `EMBEDDING_MAX_TOKENS` | Context window of the embedding model in tokens (default `512`). Chunks are split to fit within `max_tokens × 4` characters before embedding. Set to match your model (e.g. `512` for nomic-embed-text-v2-moe, `8192` for text-embedding-3-small). |
 | `EMBEDDING_MAX_CONCURRENT_FILES` | Max files indexed concurrently per push/admin-index request (default `5`). Lower for rate-limited GitHub tokens or slow embedding endpoints. |
+| `MAX_PREFETCH_CHUNKS` | Max code snippets auto-retrieved from Qdrant before the LLM review starts (default `16`). Per-repo override via `retrieval.max_prefetch_chunks` in `.pr-checker.yml`. |
+| `MAX_SEARCH_CHUNKS_PER_CALL` | Max code snippets returned per `search_code` tool call during LLM review (default `5`). Per-repo override via `retrieval.max_search_chunks_per_call` in `.pr-checker.yml`. |
 | `LLM_DEBUG_DIR` | Directory to write LLM message-history dumps when a review falls back (timeout, max-turns, or model failed to call `submit_review`). Files are named `{owner}__{repo}__{pr}__{sha}.json`. Unset by default (no dumps). |
 
 ## Code Conventions

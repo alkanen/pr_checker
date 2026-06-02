@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 _CHUNK_NS = uuid.UUID("a3b4c5d6-e7f8-1234-abcd-1234567890ab")
 
+ChunkType = Literal["function", "class", "module_block"]
+
 
 class JobStatus(str, Enum):
     PENDING = "pending"
@@ -95,11 +97,23 @@ class ProjectStandards:
 
 
 @dataclass
+class CodeSnippet:
+    file_path: str
+    chunk_name: str
+    chunk_type: ChunkType
+    content: str
+    start_line: int
+    end_line: int
+    branch: str
+
+
+@dataclass
 class ReviewContext:
     hunks: list[DiffHunk]
     standards: ProjectStandards
     linked_issues: list[LinkedIssue]
     static_findings: list[StaticFinding] = field(default_factory=list)
+    snippets: list[CodeSnippet] = field(default_factory=list)
 
 
 @dataclass
@@ -107,11 +121,22 @@ class CodeChunk:
     repo_full_name: str
     branch: str
     file_path: str
-    chunk_type: Literal["function", "class", "module_block"]
+    chunk_type: ChunkType
     chunk_name: str
     content: str
     start_line: int
     end_line: int
+
+    def to_snippet(self) -> CodeSnippet:
+        return CodeSnippet(
+            file_path=self.file_path,
+            chunk_name=self.chunk_name,
+            chunk_type=self.chunk_type,
+            content=self.content,
+            start_line=self.start_line,
+            end_line=self.end_line,
+            branch=self.branch,
+        )
 
     @property
     def point_id(self) -> str:

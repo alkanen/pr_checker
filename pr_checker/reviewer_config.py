@@ -31,6 +31,11 @@ class QdrantConfig(BaseModel):
     url: str = "http://localhost:6333"
 
 
+class RetrievalConfig(BaseModel):
+    max_prefetch_chunks: int | None = Field(default=None, ge=0)
+    max_search_chunks_per_call: int | None = Field(default=None, ge=0)
+
+
 class AnalyzersConfig(BaseModel):
     ruff: bool = True
     mypy: bool = True
@@ -56,6 +61,7 @@ class ReviewerConfig(BaseModel):
     bytes_per_param: float = Field(default=2.0, gt=0)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     checks: ChecksConfig = Field(default_factory=ChecksConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     analyzers: AnalyzersConfig = Field(default_factory=AnalyzersConfig)
@@ -90,11 +96,19 @@ def _enforce_limits(merged: ReviewerConfig, server: ReviewerConfig) -> ReviewerC
         if isinstance(server_val, bool) and not server_val:
             analyzers_data[field_name] = False
 
+    retrieval_data = merged.retrieval.model_dump()
+    for field_name in ("max_prefetch_chunks", "max_search_chunks_per_call"):
+        server_val = getattr(server.retrieval, field_name)
+        merged_val = retrieval_data[field_name]
+        if merged_val is not None and server_val is not None:
+            retrieval_data[field_name] = min(merged_val, server_val)
+
     return merged.model_copy(
         update={
             "checks": ChecksConfig(**checks_data),
             "output": OutputConfig(**output_data),
             "analyzers": AnalyzersConfig(**analyzers_data),
+            "retrieval": RetrievalConfig(**retrieval_data),
             "vram_budget_gb": min(merged.vram_budget_gb, server.vram_budget_gb),
             # Repos cannot reduce bytes_per_param below the server floor: a lower
             # value underestimates VRAM and can cause the server to overcommit GPU memory.
@@ -108,8 +122,22 @@ def _enforce_limits(merged: ReviewerConfig, server: ReviewerConfig) -> ReviewerC
 
 
 class ConfigManager:
-    def __init__(self, config_file: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_file: Path | None = None,
+        max_prefetch_chunks: int | None = None,
+        max_search_chunks_per_call: int | None = None,
+    ) -> None:
         self._server_config = self._load_file(config_file)
+        if max_prefetch_chunks is not None or max_search_chunks_per_call is not None:
+            merged = self._server_config.retrieval.model_dump()
+            if max_prefetch_chunks is not None:
+                merged["max_prefetch_chunks"] = max_prefetch_chunks
+            if max_search_chunks_per_call is not None:
+                merged["max_search_chunks_per_call"] = max_search_chunks_per_call
+            self._server_config = self._server_config.model_copy(
+                update={"retrieval": RetrievalConfig(**merged)}
+            )
 
     @property
     def server_config(self) -> ReviewerConfig:
