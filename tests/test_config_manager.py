@@ -287,3 +287,61 @@ async def test_repo_cannot_override_infrastructure_settings(
 
     assert result.qdrant.url == "http://localhost:6333"
     assert result.embedding.model == "text-embedding-3-small"
+
+
+async def test_repo_cannot_exceed_server_retrieval_limits(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    manager = ConfigManager(max_prefetch_chunks=16, max_search_chunks_per_call=5)
+    _mock_repo(httpx_mock)
+    _mock_config(
+        httpx_mock,
+        "retrieval:\n  max_prefetch_chunks: 10000\n  max_search_chunks_per_call: 999\n",
+    )
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.retrieval.max_prefetch_chunks == 16
+    assert result.retrieval.max_search_chunks_per_call == 5
+
+
+async def test_repo_can_lower_retrieval_limits(github: GitHubClient, httpx_mock: HTTPXMock) -> None:
+    manager = ConfigManager(max_prefetch_chunks=16, max_search_chunks_per_call=5)
+    _mock_repo(httpx_mock)
+    _mock_config(
+        httpx_mock,
+        "retrieval:\n  max_prefetch_chunks: 8\n  max_search_chunks_per_call: 3\n",
+    )
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result.retrieval.max_prefetch_chunks == 8
+    assert result.retrieval.max_search_chunks_per_call == 3
+
+
+def test_env_var_retrieval_overrides_yaml_config(tmp_path: Path) -> None:
+    cfg = tmp_path / "server.yml"
+    cfg.write_text("retrieval:\n  max_prefetch_chunks: 100\n  max_search_chunks_per_call: 50\n")
+    manager = ConfigManager(
+        config_file=cfg,
+        max_prefetch_chunks=16,
+        max_search_chunks_per_call=5,
+    )
+
+    assert manager.server_config.retrieval.max_prefetch_chunks == 16
+    assert manager.server_config.retrieval.max_search_chunks_per_call == 5
+
+
+async def test_retrieval_negative_value_rejected(
+    github: GitHubClient, httpx_mock: HTTPXMock
+) -> None:
+    manager = ConfigManager(max_prefetch_chunks=16)
+    _mock_repo(httpx_mock)
+    _mock_config(
+        httpx_mock,
+        "retrieval:\n  max_prefetch_chunks: -1\n",
+    )
+
+    result = await manager.for_repo("owner/repo", github)
+
+    assert result == manager.server_config

@@ -315,4 +315,7 @@ def _estimate_tokens(context: ReviewContext) -> int:
     chars += sum(len(issue.body) for issue in context.linked_issues)
     shown_findings = context.static_findings[:MAX_STATIC_FINDINGS]
     chars += sum(len(f.file_path) + len(f.code) + len(f.message) for f in shown_findings)
+    chars += sum(
+        len(s.content) + len(s.file_path) + len(s.chunk_name) + 80 for s in context.snippets
+    )
     return max(1000, chars // 4)

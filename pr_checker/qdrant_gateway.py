@@ -137,7 +137,7 @@ class QdrantGateway:
         await self._client.close()
 
     async def _safe_delete(self, coll: str, selector: FilterSelector) -> bool:
-        """Run _client.delete; return False (discarding cache) on 404 (collection deleted externally)."""
+        """Run _client.delete; return False on 404 (collection deleted externally)."""
         try:
             await self._client.delete(collection_name=coll, points_selector=selector)
             return True

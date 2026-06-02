@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 from openai import APITimeoutError, AsyncOpenAI
 
+from pr_checker.code_chunker import LANG_EXT
 from pr_checker.github_client import GitHubClient
 from pr_checker.models import Finding, ReviewContext, ReviewResult, Severity
 
@@ -589,11 +590,13 @@ def _parse_review_result(args: dict[str, Any]) -> ReviewResult:
 def _build_user_message(context: ReviewContext) -> str:
     parts: list[str] = ["## Pull Request Diff\n"]
     for hunk in context.hunks:
-        parts.append(f"### File: {hunk.file_path}\n```diff")
+        hunk_content = hunk.header + "\n" + "\n".join(f"{dl.kind}{dl.content}" for dl in hunk.lines)
+        fence = _safe_fence(hunk_content)
+        parts.append(f"### File: {hunk.file_path}\n{fence}diff")
         parts.append(hunk.header)
         for dl in hunk.lines:
             parts.append(f"{dl.kind}{dl.content}")
-        parts.append("```\n")
+        parts.append(f"{fence}\n")
 
     if context.linked_issues:
         parts.append("## Linked Issues\n")
@@ -639,7 +642,38 @@ def _build_user_message(context: ReviewContext) -> str:
             )
         parts.append("")
 
+    if context.snippets:
+        parts.append("## Related Code\n")
+        parts.append(
+            "The following code snippets were retrieved from the repository as context "
+            "relevant to the changes in this PR.\n"
+        )
+        for snippet in context.snippets:
+            lang = _guess_language(snippet.file_path)
+            parts.append(
+                f"### {snippet.file_path} ({snippet.chunk_type}: {snippet.chunk_name}) "
+                f"[{snippet.branch}]"
+            )
+            parts.append(f"Lines {snippet.start_line}-{snippet.end_line}")
+            fence = _safe_fence(snippet.content)
+            parts.append(f"{fence}{lang}")
+            parts.append(snippet.content)
+            parts.append(f"{fence}\n")
+
     parts.append(
         "Analyse the diff. Use tools if needed, then call submit_review with your findings."
     )
     return "\n".join(parts)
+
+
+def _guess_language(file_path: str) -> str:
+    from pathlib import PurePosixPath
+
+    suffix = PurePosixPath(file_path).suffix.lower()
+    return LANG_EXT.get(suffix, "")
+
+
+def _safe_fence(content: str) -> str:
+    runs = re.findall(r"`+", content)
+    longest = max((len(r) for r in runs), default=0)
+    return "`" * max(3, longest + 1)
