@@ -7,6 +7,8 @@ from typing import Any, Literal
 _CHUNK_NS = uuid.UUID("a3b4c5d6-e7f8-1234-abcd-1234567890ab")
 
 ChunkType = Literal["function", "class", "module_block"]
+_CHUNK_TYPES: set[str] = {"function", "class", "module_block"}
+_DEFAULT_CHUNK_TYPE: ChunkType = "module_block"
 
 
 class JobStatus(str, Enum):
@@ -105,6 +107,20 @@ class CodeSnippet:
     start_line: int
     end_line: int
     branch: str
+
+    @classmethod
+    def from_payload(cls, p: dict[str, Any]) -> "CodeSnippet":
+        raw_type = p.get("chunk_type", "")
+        chunk_type: ChunkType = raw_type if raw_type in _CHUNK_TYPES else _DEFAULT_CHUNK_TYPE
+        return cls(
+            file_path=p.get("file_path", ""),
+            chunk_name=p.get("chunk_name", ""),
+            chunk_type=chunk_type,
+            content=p.get("content", ""),
+            start_line=p.get("start_line", 1),
+            end_line=p.get("end_line", 1),
+            branch=p.get("branch", ""),
+        )
 
 
 @dataclass

@@ -12,7 +12,7 @@ from qdrant_client.models import (
     VectorParams,
 )
 
-from pr_checker.models import CodeChunk
+from pr_checker.models import CodeChunk, CodeSnippet
 
 _log = logging.getLogger(__name__)
 
@@ -132,6 +132,43 @@ class QdrantGateway:
         )
         if deleted:
             _log.info("Deleted all points for branch %s in %s", branch, repo_full_name)
+
+    async def search(
+        self,
+        vector: list[float],
+        repo_full_name: str,
+        branch: str | None = None,
+        limit: int = 10,
+    ) -> list[CodeSnippet]:
+        if not vector or limit < 1:
+            return []
+
+        coll = collection_name(repo_full_name)
+        if coll not in self._known_collections and not await self._client.collection_exists(coll):
+            return []
+        self._known_collections.add(coll)
+
+        query_filter: Filter | None = None
+        if branch is not None:
+            query_filter = Filter(
+                must=[FieldCondition(key="branch", match=MatchValue(value=branch))]
+            )
+
+        try:
+            response = await self._client.query_points(
+                collection_name=coll,
+                query=vector,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True,
+            )
+        except UnexpectedResponse as exc:
+            if exc.status_code != 404:
+                raise
+            self._known_collections.discard(coll)
+            return []
+
+        return [CodeSnippet.from_payload(pt.payload or {}) for pt in response.points]
 
     async def aclose(self) -> None:
         await self._client.close()
