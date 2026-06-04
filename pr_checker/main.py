@@ -13,6 +13,7 @@ from openai import AsyncOpenAI
 
 from pr_checker.code_indexer import CodeIndexer, aggregate_push_files
 from pr_checker.config import ServerConfig
+from pr_checker.context_builder import ContextBuilder
 from pr_checker.db import PersistenceLayer
 from pr_checker.embedding_service import EmbeddingService
 from pr_checker.github_client import GitHubClient
@@ -60,6 +61,28 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         lm_studio = LMStudioClient(cfg.lm_studio_url, cfg.lm_studio_api_key)
         model_manager = ModelManager(lm_studio)
 
+    indexer: CodeIndexer | None = None
+    qdrant_gateway: QdrantGateway | None = None
+    context_builder: ContextBuilder | None = None
+    if cfg.qdrant_url:
+        from qdrant_client import AsyncQdrantClient
+
+        qdrant_gateway = QdrantGateway(AsyncQdrantClient(url=cfg.qdrant_url))
+        embedding_service = EmbeddingService(openai_client, cfg.embedding_model)
+        indexer = CodeIndexer(
+            github=github,
+            embedding=embedding_service,
+            qdrant=qdrant_gateway,
+            persistence=persistence,
+            max_chars=cfg.embedding_max_tokens * 4,
+            max_concurrent_files=cfg.embedding_max_concurrent_files,
+        )
+        context_builder = ContextBuilder(
+            gateway=qdrant_gateway,
+            embedding_service=embedding_service,
+            max_prefetch_chunks=cfg.max_prefetch_chunks,
+        )
+
     orchestrator = ReviewOrchestrator(
         github=github,
         config_manager=config_manager,
@@ -70,6 +93,7 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
         model_override=cfg.llm_model or None,
         static_analyzer=StaticAnalyzer(),
         debug_dir=Path(cfg.llm_debug_dir) if cfg.llm_debug_dir else None,
+        context_builder=context_builder,
     )
     queue = ReviewQueue(persistence, github, orchestrator)
 
@@ -84,21 +108,6 @@ def create_app(config: ServerConfig | None = None) -> FastAPI:
     # Tracks (repo, branch) pairs for which a full re-index is currently in flight,
     # used by the admin endpoint to reject duplicate concurrent requests.
     in_flight_indexes: set[tuple[str, str]] = set()
-
-    indexer: CodeIndexer | None = None
-    qdrant_gateway: QdrantGateway | None = None
-    if cfg.qdrant_url:
-        from qdrant_client import AsyncQdrantClient
-
-        qdrant_gateway = QdrantGateway(AsyncQdrantClient(url=cfg.qdrant_url))
-        indexer = CodeIndexer(
-            github=github,
-            embedding=EmbeddingService(openai_client, cfg.embedding_model),
-            qdrant=qdrant_gateway,
-            persistence=persistence,
-            max_chars=cfg.embedding_max_tokens * 4,
-            max_concurrent_files=cfg.embedding_max_concurrent_files,
-        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
