@@ -37,7 +37,8 @@ def _make_scored_point(
     )
 
 
-def _mock_client() -> AsyncMock:
+@pytest.fixture
+def mock_client() -> AsyncMock:
     client = AsyncMock()
     client.collection_exists = AsyncMock(return_value=True)
     client.query_points = AsyncMock(return_value=QueryResponse(points=[]))
@@ -45,12 +46,14 @@ def _mock_client() -> AsyncMock:
 
 
 @pytest.fixture
-def gateway() -> QdrantGateway:
-    return QdrantGateway(_mock_client())
+def gateway(mock_client: AsyncMock) -> QdrantGateway:
+    return QdrantGateway(mock_client)
 
 
 class TestSearch:
-    async def test_returns_snippets_from_payload(self, gateway: QdrantGateway) -> None:
+    async def test_returns_snippets_from_payload(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         point = _make_scored_point(
             file_path="src/utils.py",
             chunk_name="helper",
@@ -60,7 +63,7 @@ class TestSearch:
             end_line=15,
             branch="feature",
         )
-        gateway._client.query_points.return_value = QueryResponse(points=[point])
+        mock_client.query_points.return_value = QueryResponse(points=[point])
 
         result = await gateway.search([0.1, 0.2], "owner/repo", limit=5)
 
@@ -74,50 +77,61 @@ class TestSearch:
         assert s.start_line == 10
         assert s.end_line == 15
         assert s.branch == "feature"
+        assert s.score == 0.95
 
-    async def test_preserves_relevance_order(self, gateway: QdrantGateway) -> None:
+    async def test_preserves_relevance_order(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         points = [
             _make_scored_point(chunk_name="best", score=0.99),
             _make_scored_point(chunk_name="good", score=0.80),
             _make_scored_point(chunk_name="okay", score=0.60),
         ]
-        gateway._client.query_points.return_value = QueryResponse(points=points)
+        mock_client.query_points.return_value = QueryResponse(points=points)
 
         result = await gateway.search([0.1], "owner/repo")
 
         assert [s.chunk_name for s in result] == ["best", "good", "okay"]
 
-    async def test_branch_filter_passed_to_query(self, gateway: QdrantGateway) -> None:
-        gateway._client.query_points.return_value = QueryResponse(points=[])
+    async def test_branch_filter_passed_to_query(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
+        mock_client.query_points.return_value = QueryResponse(points=[])
 
         await gateway.search([0.1], "owner/repo", branch="develop")
 
-        call_kwargs = gateway._client.query_points.call_args.kwargs
+        call_kwargs = mock_client.query_points.call_args.kwargs
         qf = call_kwargs["query_filter"]
         assert qf is not None
         assert len(qf.must) == 1
         assert qf.must[0].key == "branch"
         assert qf.must[0].match.value == "develop"
 
-    async def test_no_branch_filter_when_none(self, gateway: QdrantGateway) -> None:
-        gateway._client.query_points.return_value = QueryResponse(points=[])
+    async def test_no_branch_filter_when_none(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
+        mock_client.query_points.return_value = QueryResponse(points=[])
 
         await gateway.search([0.1], "owner/repo", branch=None)
 
-        call_kwargs = gateway._client.query_points.call_args.kwargs
+        call_kwargs = mock_client.query_points.call_args.kwargs
         assert call_kwargs["query_filter"] is None
 
-    async def test_empty_list_when_collection_missing(self, gateway: QdrantGateway) -> None:
-        gateway._client.collection_exists.return_value = False
+    async def test_empty_list_when_collection_missing(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
+        mock_client.collection_exists.return_value = False
 
         result = await gateway.search([0.1], "owner/repo")
 
         assert result == []
-        gateway._client.query_points.assert_not_called()
+        mock_client.query_points.assert_not_called()
 
-    async def test_empty_list_on_404_unexpected_response(self, gateway: QdrantGateway) -> None:
+    async def test_empty_list_on_404_unexpected_response(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         gateway._known_collections.add(collection_name("owner/repo"))
-        gateway._client.query_points.side_effect = UnexpectedResponse(
+        mock_client.query_points.side_effect = UnexpectedResponse(
             status_code=404, reason_phrase="Not Found", content=b"", headers=httpx.Headers()
         )
 
@@ -126,52 +140,62 @@ class TestSearch:
         assert result == []
         assert collection_name("owner/repo") not in gateway._known_collections
 
-    async def test_non_404_unexpected_response_raises(self, gateway: QdrantGateway) -> None:
+    async def test_non_404_unexpected_response_raises(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         gateway._known_collections.add(collection_name("owner/repo"))
-        gateway._client.query_points.side_effect = UnexpectedResponse(
+        mock_client.query_points.side_effect = UnexpectedResponse(
             status_code=500, reason_phrase="Internal", content=b"", headers=httpx.Headers()
         )
 
         with pytest.raises(UnexpectedResponse):
             await gateway.search([0.1], "owner/repo")
 
-    async def test_limit_forwarded(self, gateway: QdrantGateway) -> None:
-        gateway._client.query_points.return_value = QueryResponse(points=[])
+    async def test_limit_forwarded(self, gateway: QdrantGateway, mock_client: AsyncMock) -> None:
+        mock_client.query_points.return_value = QueryResponse(points=[])
 
         await gateway.search([0.1], "owner/repo", limit=3)
 
-        call_kwargs = gateway._client.query_points.call_args.kwargs
+        call_kwargs = mock_client.query_points.call_args.kwargs
         assert call_kwargs["limit"] == 3
 
-    async def test_uses_collection_name_helper(self, gateway: QdrantGateway) -> None:
-        gateway._client.query_points.return_value = QueryResponse(points=[])
+    async def test_uses_collection_name_helper(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
+        mock_client.query_points.return_value = QueryResponse(points=[])
 
         await gateway.search([0.1], "org/my-repo")
 
-        call_kwargs = gateway._client.query_points.call_args.kwargs
+        call_kwargs = mock_client.query_points.call_args.kwargs
         assert call_kwargs["collection_name"] == "org__my-repo"
 
-    async def test_skips_collection_exists_when_known(self, gateway: QdrantGateway) -> None:
+    async def test_skips_collection_exists_when_known(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         gateway._known_collections.add(collection_name("owner/repo"))
-        gateway._client.query_points.return_value = QueryResponse(points=[])
+        mock_client.query_points.return_value = QueryResponse(points=[])
 
         await gateway.search([0.1], "owner/repo")
 
-        gateway._client.collection_exists.assert_not_called()
+        mock_client.collection_exists.assert_not_called()
 
-    async def test_empty_vector_returns_early(self, gateway: QdrantGateway) -> None:
+    async def test_empty_vector_returns_early(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         result = await gateway.search([], "owner/repo")
 
         assert result == []
-        gateway._client.query_points.assert_not_called()
-        gateway._client.collection_exists.assert_not_called()
+        mock_client.query_points.assert_not_called()
+        mock_client.collection_exists.assert_not_called()
 
-    async def test_zero_limit_returns_early(self, gateway: QdrantGateway) -> None:
+    async def test_zero_limit_returns_early(
+        self, gateway: QdrantGateway, mock_client: AsyncMock
+    ) -> None:
         result = await gateway.search([0.1], "owner/repo", limit=0)
 
         assert result == []
-        gateway._client.query_points.assert_not_called()
-        gateway._client.collection_exists.assert_not_called()
+        mock_client.query_points.assert_not_called()
+        mock_client.collection_exists.assert_not_called()
 
 
 class TestCodeSnippetFromPayload:
