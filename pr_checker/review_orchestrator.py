@@ -8,12 +8,14 @@ from typing import Any, NoReturn
 import httpx
 from openai import AsyncOpenAI
 
+from pr_checker.context_builder import ContextBuilder
 from pr_checker.exceptions import StalePRError
 from pr_checker.github_client import GitHubClient
+from pr_checker.identifier_extractor import extract_identifiers
 from pr_checker.issue_resolver import IssueResolver
 from pr_checker.llm_client import MAX_STATIC_FINDINGS, LLMClient
 from pr_checker.model_manager import ModelManager
-from pr_checker.models import PRJob, ReviewContext, StaticFinding
+from pr_checker.models import CodeSnippet, PRJob, ReviewContext, StaticFinding
 from pr_checker.review_formatter import ReviewFormatter
 from pr_checker.reviewer_config import ConfigManager
 from pr_checker.standards_detector import StandardsDetector
@@ -34,6 +36,7 @@ class ReviewOrchestrator:
         model_override: str | None = None,
         static_analyzer: StaticAnalyzer | None = None,
         debug_dir: Path | None = None,
+        context_builder: ContextBuilder | None = None,
     ) -> None:
         self._github = github
         self._config_manager = config_manager
@@ -44,6 +47,7 @@ class ReviewOrchestrator:
         self._model_override = model_override
         self._static_analyzer = static_analyzer
         self._debug_dir = debug_dir
+        self._context_builder = context_builder
         self._formatter = ReviewFormatter()
 
     async def run(self, job: PRJob) -> None:
@@ -130,8 +134,31 @@ class ReviewOrchestrator:
                     exc_info=True,
                 )
 
+        snippets: list[CodeSnippet] = []
+        if self._context_builder is not None:
+            t_ctx = time.monotonic()
+            identifiers = extract_identifiers(hunks)
+            snippets = await self._context_builder.build(
+                identifiers=identifiers,
+                repo_full_name=job.repo_full_name,
+                base_branch=job.base_branch,
+                head_branch=job.head_branch,
+                limit=config.retrieval.max_prefetch_chunks,
+            )
+            _log.info(
+                "Context retrieval in %.1fs: %d snippets for %s #%d",
+                time.monotonic() - t_ctx,
+                len(snippets),
+                job.repo_full_name,
+                job.pr_number,
+            )
+
         context = ReviewContext(
-            hunks=hunks, standards=standards, linked_issues=issues, static_findings=static_findings
+            hunks=hunks,
+            standards=standards,
+            linked_issues=issues,
+            static_findings=static_findings,
+            snippets=snippets,
         )
         estimated_tokens = _estimate_tokens(context)
 
@@ -164,6 +191,11 @@ class ReviewOrchestrator:
             pr_number=job.pr_number,
             head_sha=job.head_sha,
             debug_dir=self._debug_dir,
+            context_builder=self._context_builder,
+            head_branch=job.head_branch,
+            max_search_chunks=config.retrieval.max_search_chunks_per_call
+            if config.retrieval.max_search_chunks_per_call is not None
+            else 5,
         )
 
         t2 = time.monotonic()
@@ -244,14 +276,31 @@ class ReviewOrchestrator:
                     job.pr_number,
                     exc.response.text,
                 )
-                # GitHub forbids REQUEST_CHANGES on your own PR. Retry as COMMENT
-                # so the findings are still posted when reviewer == PR author.
-                if event == "REQUEST_CHANGES" and "own pull request" in exc.response.text:
+                # GitHub forbids APPROVE and REQUEST_CHANGES on your own PR.
+                # Retry as COMMENT so findings are still posted when
+                # reviewer == PR author.  Not a bug — just means the formal
+                # approval/request-changes state can't be set.  The permanent
+                # fix is to use a separate GitHub account for the bot.
+                if (
+                    event in ("REQUEST_CHANGES", "APPROVE")
+                    and "own pull request" in exc.response.text
+                ):
                     _log.info(
-                        "Retrying review as COMMENT (reviewer is PR author) for %s #%d",
+                        "Retrying review as COMMENT (reviewer is PR author, "
+                        "cannot %s own PR) for %s #%d",
+                        event,
                         job.repo_full_name,
                         job.pr_number,
                     )
+                    verdict = event.replace("_", " ").lower()
+                    own_pr_note = (
+                        f"\n\n---\n*Note: the reviewer wanted to "
+                        f"**{verdict}** this PR, but GitHub does not "
+                        f"allow setting that status on your own pull "
+                        f"request. Use a separate bot account to "
+                        f"enable formal review statuses.*"
+                    )
+                    review_body = (review_body or "") + own_pr_note
                     event = "COMMENT"
                     try:
                         await self._github.submit_pr_review(

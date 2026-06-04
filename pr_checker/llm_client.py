@@ -11,8 +11,9 @@ import httpx
 from openai import APITimeoutError, AsyncOpenAI
 
 from pr_checker.code_chunker import LANG_EXT
+from pr_checker.context_builder import ContextBuilder
 from pr_checker.github_client import GitHubClient
-from pr_checker.models import Finding, ReviewContext, ReviewResult, Severity
+from pr_checker.models import CodeSnippet, Finding, ReviewContext, ReviewResult, Severity
 
 _log = logging.getLogger(__name__)
 
@@ -122,6 +123,9 @@ class LLMClient:
         head_sha: str,
         max_turns: int = DEFAULT_MAX_TURNS,
         debug_dir: Path | None = None,
+        context_builder: ContextBuilder | None = None,
+        head_branch: str = "",  # required when context_builder is set
+        max_search_chunks: int = 5,
     ) -> None:
         self._openai = openai
         self._model = model
@@ -131,6 +135,9 @@ class LLMClient:
         self._sha = head_sha
         self._max_turns = max_turns
         self._debug_dir = debug_dir
+        self._context_builder = context_builder
+        self._head_branch = head_branch
+        self._max_search_chunks = max_search_chunks
 
     async def review(self, context: ReviewContext) -> ReviewResult:
         messages: list[Any] = [
@@ -141,6 +148,8 @@ class LLMClient:
         prev_prompt_chars = 0
         reminded = False
         force_submit = False
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
         for turn in range(self._max_turns):
             prompt_chars = sum(
                 len(m["content"]) for m in messages if isinstance(m.get("content"), str)
@@ -166,7 +175,7 @@ class LLMClient:
             )
             force_submit = False
             try:
-                content, tool_calls, finish_reason, elapsed = await self._stream_turn(
+                content, tool_calls, finish_reason, elapsed, usage = await self._stream_turn(
                     messages, turn, tool_choice=tool_choice
                 )
             except (httpx.TimeoutException, APITimeoutError) as exc:
@@ -178,23 +187,39 @@ class LLMClient:
                     exc,
                 )
                 self._dump_messages(messages)
-                return _fallback_result("LLM request timed out; review incomplete.")
+                return _fallback_result(
+                    "LLM request timed out; review incomplete.",
+                    _collect_assistant_content(messages),
+                )
+
+            if usage:
+                total_prompt_tokens += usage["prompt_tokens"]
+                total_completion_tokens += usage["completion_tokens"]
+                usage_str = (
+                    f" | prompt={usage['prompt_tokens']}"
+                    f" completion={usage['completion_tokens']}"
+                    f" total={usage['total_tokens']}"
+                )
+            else:
+                usage_str = ""
 
             if tool_calls:
                 _log.info(
-                    "Turn %d/%d completed in %.1fs: tools=[%s]",
+                    "Turn %d/%d completed in %.1fs: tools=[%s]%s",
                     turn + 1,
                     self._max_turns,
                     elapsed,
                     ", ".join(tc["function"]["name"] for tc in tool_calls),
+                    usage_str,
                 )
             else:
                 _log.debug(
-                    "Turn %d/%d completed in %.1fs: no tools (finish=%s)",
+                    "Turn %d/%d completed in %.1fs: no tools (finish=%s)%s",
                     turn + 1,
                     self._max_turns,
                     elapsed,
                     finish_reason,
+                    usage_str,
                 )
 
             msg: dict[str, Any] = {"role": "assistant"}
@@ -290,11 +315,22 @@ class LLMClient:
                     continue
 
                 if name == "submit_review":
-                    _log.info(
-                        "Tool call: submit_review(verdict=%s, findings=%d)",
-                        args.get("verdict", "?"),
-                        len(args.get("findings", [])),
-                    )
+                    if total_prompt_tokens:
+                        _log.info(
+                            "Tool call: submit_review(verdict=%s, findings=%d) | "
+                            "cumulative tokens: prompt=%d completion=%d total=%d",
+                            args.get("verdict", "?"),
+                            len(args.get("findings", [])),
+                            total_prompt_tokens,
+                            total_completion_tokens,
+                            total_prompt_tokens + total_completion_tokens,
+                        )
+                    else:
+                        _log.info(
+                            "Tool call: submit_review(verdict=%s, findings=%d)",
+                            args.get("verdict", "?"),
+                            len(args.get("findings", [])),
+                        )
                     return _parse_review_result(args)
 
                 _log.info(
@@ -315,7 +351,8 @@ class LLMClient:
         )
         self._dump_messages(messages)
         return _fallback_result(
-            f"Review exceeded the maximum tool-call turn limit ({self._max_turns})."
+            f"Review exceeded the maximum tool-call turn limit ({self._max_turns}).",
+            _collect_assistant_content(messages),
         )
 
     def _dump_messages(self, messages: list[Any]) -> None:
@@ -336,7 +373,7 @@ class LLMClient:
         messages: list[Any],
         turn: int,
         tool_choice: Any = "auto",
-    ) -> tuple[str | None, list[dict[str, Any]], str | None, float]:
+    ) -> tuple[str | None, list[dict[str, Any]], str | None, float, dict[str, int] | None]:
         """Stream one LLM turn; accumulate deltas and return (content, tool_calls, finish, elapsed).
 
         LLM_TIMEOUT acts as the read timeout — max wait between any two received chunks.
@@ -346,6 +383,7 @@ class LLMClient:
         reasoning_parts: list[str] = []
         tool_calls_acc: dict[int, dict[str, Any]] = {}
         finish_reason: str | None = None
+        usage: dict[str, int] | None = None
         chunk_count = 0
         t0 = time.monotonic()
         t_last_log = t0
@@ -364,6 +402,13 @@ class LLMClient:
                 choice = chunk.choices[0]
                 if choice.finish_reason is not None:
                     finish_reason = choice.finish_reason
+                chunk_usage = getattr(chunk, "usage", None)
+                if chunk_usage is not None:
+                    usage = {
+                        "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                        "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                        "total_tokens": getattr(chunk_usage, "total_tokens", 0) or 0,
+                    }
                 delta = choice.delta
                 if delta.content:
                     content_parts.append(delta.content)
@@ -451,15 +496,14 @@ class LLMClient:
                     or None
                 )
 
-        return content, tool_calls, finish_reason, elapsed
+        return content, tool_calls, finish_reason, elapsed, usage
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> str:
         try:
             if name == "get_code_snippet":
                 return await self._get_code_snippet(args)
             if name == "search_code":
-                # stub — wired to Qdrant in Phase 7
-                return "[]"
+                return await self._search_code(args)
             _log.warning("Unknown tool called: %s", name)
             return f"Unknown tool: {name}"
         except Exception as exc:
@@ -483,6 +527,25 @@ class LLMClient:
         lines = content.splitlines()
         snippet = "\n".join(lines[start - 1 : end])
         return f"```\n{snippet}\n```"
+
+    async def _search_code(self, args: dict[str, Any]) -> str:
+        query = args.get("query")
+        if not query:
+            return "Error: search_code requires a query argument."
+        if self._context_builder is None:
+            return "No results found."
+        # Searches the feature branch only; the LLM already has the diff
+        # showing what changed from base, so base-branch results would be
+        # redundant or stale.
+        results = await self._context_builder.search(
+            query=query,
+            repo_full_name=self._repo,
+            branch=self._head_branch,
+            limit=self._max_search_chunks,
+        )
+        if not results:
+            return "No results found."
+        return _format_snippets(results)
 
 
 def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
@@ -537,6 +600,15 @@ def _parse_text_tool_calls(content: str) -> list[dict[str, Any]]:
                 }
             )
     return result
+
+
+def _collect_assistant_content(messages: list[Any]) -> str:
+    parts = [
+        m["content"]
+        for m in messages
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"]
+    ]
+    return "\n\n".join(parts)
 
 
 def _fallback_result(reason: str, assistant_content: str = "") -> ReviewResult:
@@ -648,17 +720,7 @@ def _build_user_message(context: ReviewContext) -> str:
             "The following code snippets were retrieved from the repository as context "
             "relevant to the changes in this PR.\n"
         )
-        for snippet in context.snippets:
-            lang = _guess_language(snippet.file_path)
-            parts.append(
-                f"### {snippet.file_path} ({snippet.chunk_type}: {snippet.chunk_name}) "
-                f"[{snippet.branch}]"
-            )
-            parts.append(f"Lines {snippet.start_line}-{snippet.end_line}")
-            fence = _safe_fence(snippet.content)
-            parts.append(f"{fence}{lang}")
-            parts.append(snippet.content)
-            parts.append(f"{fence}\n")
+        parts.append(_format_snippets(context.snippets))
 
     parts.append(
         "Analyse the diff. Use tools if needed, then call submit_review with your findings."
@@ -677,3 +739,19 @@ def _safe_fence(content: str) -> str:
     runs = re.findall(r"`+", content)
     longest = max((len(r) for r in runs), default=0)
     return "`" * max(3, longest + 1)
+
+
+def _format_snippets(snippets: list[CodeSnippet]) -> str:
+    parts: list[str] = []
+    for snippet in snippets:
+        lang = _guess_language(snippet.file_path)
+        parts.append(
+            f"### {snippet.file_path} ({snippet.chunk_type}: {snippet.chunk_name}) "
+            f"[{snippet.branch}]"
+        )
+        parts.append(f"Lines {snippet.start_line}-{snippet.end_line}")
+        fence = _safe_fence(snippet.content)
+        parts.append(f"{fence}{lang}")
+        parts.append(snippet.content)
+        parts.append(f"{fence}\n")
+    return "\n".join(parts)

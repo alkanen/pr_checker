@@ -310,6 +310,31 @@ class TestBuild:
 
         assert len(result) <= 3
 
+    async def test_limit_overrides_default_budget(
+        self, gateway: AsyncMock, embedding: AsyncMock
+    ) -> None:
+        embedding.embed.return_value = [[0.1]]
+
+        async def search_side_effect(
+            vector: list[float], repo: str, branch: str | None = None, limit: int = 10
+        ) -> list[CodeSnippet]:
+            return [
+                _snippet(
+                    chunk_name=f"fn_{branch}_{i}",
+                    content=f"content_{branch}_{i}",
+                    branch=branch or "",
+                    score=0.9 - i * 0.1,
+                )
+                for i in range(5)
+            ]
+
+        gateway.search.side_effect = search_side_effect
+        cb = ContextBuilder(gateway, embedding, max_prefetch_chunks=16)
+
+        result = await cb.build([_ident("fn")], "owner/repo", "main", "feat", limit=2)
+
+        assert len(result) <= 2
+
     async def test_embeds_identifier_names(self, gateway: AsyncMock, embedding: AsyncMock) -> None:
         embedding.embed.return_value = [[0.1], [0.2]]
         gateway.search.return_value = []
@@ -352,15 +377,15 @@ class TestSearch:
 
         gateway.search.assert_called_once_with([0.1], "owner/repo", branch="develop", limit=3)
 
-    async def test_embedding_failure_returns_empty(
+    async def test_embedding_failure_propagates(
         self, gateway: AsyncMock, embedding: AsyncMock
     ) -> None:
         embedding.embed.side_effect = RuntimeError("api down")
         cb = ContextBuilder(gateway, embedding)
 
-        result = await cb.search("query", "owner/repo", "main")
+        with pytest.raises(RuntimeError, match="api down"):
+            await cb.search("query", "owner/repo", "main")
 
-        assert result == []
         gateway.search.assert_not_called()
 
     async def test_embeds_query_string(self, gateway: AsyncMock, embedding: AsyncMock) -> None:

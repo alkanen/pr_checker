@@ -381,7 +381,7 @@ async def test_get_code_snippet_file_fetch_error_returns_error_text(
 # ---------------------------------------------------------------------------
 
 
-async def test_search_code_returns_empty_stub(mock_github: AsyncMock) -> None:
+async def test_search_code_without_context_builder(mock_github: AsyncMock) -> None:
     r1 = _tool_call_response("search_code", {"query": "database connection"})
     mock_openai = _mock_openai(r1, _submit_response())
 
@@ -389,7 +389,7 @@ async def test_search_code_returns_empty_stub(mock_github: AsyncMock) -> None:
 
     second_call_messages = mock_openai.chat.completions.create.call_args_list[1].kwargs["messages"]
     tool_result = next(m for m in second_call_messages if m.get("role") == "tool")
-    assert tool_result["content"] == "[]"
+    assert tool_result["content"] == "No results found."
 
 
 # ---------------------------------------------------------------------------

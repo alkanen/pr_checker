@@ -72,6 +72,7 @@ class ContextBuilder:
         repo_full_name: str,
         base_branch: str,
         head_branch: str,
+        limit: int | None = None,
     ) -> list[CodeSnippet]:
         if not identifiers:
             _log.info("No identifiers extracted; skipping RAG context")
@@ -105,7 +106,8 @@ class ContextBuilder:
 
         deduped = _deduplicate(raw, base_branch)
         deduped.sort(key=lambda s: s.score, reverse=True)
-        return deduped[: self._max_prefetch_chunks]
+        budget = limit if limit is not None else self._max_prefetch_chunks
+        return deduped[:budget]
 
     async def search(
         self,
@@ -115,12 +117,10 @@ class ContextBuilder:
         limit: int = 5,
     ) -> list[CodeSnippet]:
         # Single query, no fan-out — semaphore not needed.
-        try:
-            vectors = await self._embedding.embed([query])
-        except Exception:
-            _log.exception("Embedding failed for search query")
-            return []
-
+        # Embedding errors propagate to the caller so tool dispatch can
+        # return a distinguishable error to the LLM (unlike build(), which
+        # swallows failures and returns partial results).
+        vectors = await self._embedding.embed([query])
         if not vectors:
             return []
 
