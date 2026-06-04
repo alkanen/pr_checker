@@ -168,7 +168,12 @@ class QdrantGateway:
             self._known_collections.discard(coll)
             return []
 
-        return [CodeSnippet.from_payload(pt.payload or {}) for pt in response.points]
+        snippets: list[CodeSnippet] = []
+        for pt in response.points:
+            snippet = CodeSnippet.from_payload(pt.payload or {})
+            snippet.score = pt.score
+            snippets.append(snippet)
+        return snippets
 
     async def aclose(self) -> None:
         await self._client.close()

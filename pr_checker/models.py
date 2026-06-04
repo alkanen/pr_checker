@@ -107,6 +107,7 @@ class CodeSnippet:
     start_line: int
     end_line: int
     branch: str
+    score: float = 0.0
 
     @classmethod
     def from_payload(cls, p: dict[str, Any]) -> "CodeSnippet":
