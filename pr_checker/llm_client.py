@@ -144,6 +144,8 @@ class LLMClient:
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_message(context)},
         ]
+        for m in messages:
+            self._append_log(m)
 
         prev_prompt_chars = 0
         reminded = False
@@ -175,9 +177,14 @@ class LLMClient:
             )
             force_submit = False
             try:
-                content, tool_calls, finish_reason, elapsed, usage = await self._stream_turn(
-                    messages, turn, tool_choice=tool_choice
-                )
+                (
+                    content,
+                    reasoning,
+                    tool_calls,
+                    finish_reason,
+                    elapsed,
+                    usage,
+                ) = await self._stream_turn(messages, turn, tool_choice=tool_choice)
             except (httpx.TimeoutException, APITimeoutError) as exc:
                 _log.warning(
                     "LLM stream timed out on turn %d/%d (model=%s): %s",
@@ -186,7 +193,6 @@ class LLMClient:
                     self._model,
                     exc,
                 )
-                self._dump_messages(messages)
                 return _fallback_result(
                     "LLM request timed out; review incomplete.",
                     _collect_assistant_content(messages),
@@ -229,6 +235,15 @@ class LLMClient:
                 msg["tool_calls"] = tool_calls
             messages.append(msg)
 
+            log_entry: dict[str, Any] = dict(msg)
+            if reasoning:
+                log_entry["reasoning"] = reasoning
+            if usage:
+                log_entry["usage"] = usage
+            log_entry["elapsed"] = round(elapsed, 2)
+            log_entry["turn"] = turn + 1
+            self._append_log(log_entry)
+
             if not tool_calls:
                 if not reminded and turn < self._max_turns - 1:
                     if content:
@@ -250,6 +265,7 @@ class LLMClient:
                             prose_msg,
                             {"role": "user", "content": reminder},
                         ]
+                        self._append_log(messages[-1])
                         kind = "prose"
                     else:
                         # Model returned a completely empty response — drop it and
@@ -260,6 +276,7 @@ class LLMClient:
                             " now with your findings based on the diff."
                         )
                         messages = [messages[0], messages[1], {"role": "user", "content": reminder}]
+                        self._append_log(messages[-1])
                         kind = "empty response"
                     _log.warning(
                         "Turn %d/%d: model gave %s but no tool call (model=%s); "
@@ -278,7 +295,6 @@ class LLMClient:
                     turn + 1,
                     self._model,
                 )
-                self._dump_messages(messages)
                 return _fallback_result("Model did not call submit_review.", content or "")
 
             for tool_call in tool_calls:
@@ -301,17 +317,14 @@ class LLMClient:
                         bad_args,
                     )
                     if name == "submit_review":
-                        # Forced call produced unparseable arguments — give up rather
-                        # than looping with force_submit cleared.
-                        self._dump_messages(messages)
                         return _fallback_result("submit_review called with malformed arguments.")
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call["id"],
-                            "content": f"Error: could not parse tool arguments — {bad_args}",
-                        }
-                    )
+                    error_msg = {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": f"Error: could not parse tool arguments — {bad_args}",
+                    }
+                    self._append_log(error_msg)
+                    messages.append(error_msg)
                     continue
 
                 if name == "submit_review":
@@ -340,40 +353,49 @@ class LLMClient:
                 result_text = await self._dispatch_tool(name, args)
                 elapsed_ms = int((time.monotonic() - t1) * 1000)
                 _log.info("Tool result: %s -> %d chars (%dms)", name, len(result_text), elapsed_ms)
-                messages.append(
-                    {"role": "tool", "tool_call_id": tool_call["id"], "content": result_text}
-                )
+                tool_msg = {
+                    "role": "tool",
+                    "tool_call_id": tool_call["id"],
+                    "content": result_text,
+                }
+                self._append_log(tool_msg)
+                messages.append(tool_msg)
 
         _log.warning(
             "LLM review exceeded max_turns=%d (model=%s); returning partial result",
             self._max_turns,
             self._model,
         )
-        self._dump_messages(messages)
         return _fallback_result(
             f"Review exceeded the maximum tool-call turn limit ({self._max_turns}).",
             _collect_assistant_content(messages),
         )
 
-    def _dump_messages(self, messages: list[Any]) -> None:
+    def _log_path(self) -> Path | None:
         if self._debug_dir is None:
-            return
+            return None
         owner, repo = self._repo.split("/", 1)
-        filename = f"{owner}__{repo}__{self._pr_number}__{self._sha}.json"
-        path = self._debug_dir / filename
+        return self._debug_dir / f"{owner}__{repo}__{self._pr_number}__{self._sha}.jsonl"
+
+    def _append_log(self, entry: dict[str, Any]) -> None:
+        path = self._log_path()
+        if path is None:
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(messages, indent=2, ensure_ascii=False))
-            _log.info("LLM message history dumped to %s", path)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception:
-            _log.warning("Failed to write LLM debug dump to %s", path, exc_info=True)
+            _log.warning("Failed to append to debug log %s", path, exc_info=True)
 
     async def _stream_turn(
         self,
         messages: list[Any],
         turn: int,
         tool_choice: Any = "auto",
-    ) -> tuple[str | None, list[dict[str, Any]], str | None, float, dict[str, int] | None]:
+    ) -> tuple[
+        str | None, str | None, list[dict[str, Any]], str | None, float, dict[str, int] | None
+    ]:
         """Stream one LLM turn; accumulate deltas and return (content, tool_calls, finish, elapsed).
 
         LLM_TIMEOUT acts as the read timeout — max wait between any two received chunks.
@@ -496,7 +518,8 @@ class LLMClient:
                     or None
                 )
 
-        return content, tool_calls, finish_reason, elapsed, usage
+        reasoning = "".join(reasoning_parts) or None
+        return content, reasoning, tool_calls, finish_reason, elapsed, usage
 
     async def _dispatch_tool(self, name: str, args: dict[str, Any]) -> str:
         try:
