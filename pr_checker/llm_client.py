@@ -97,6 +97,7 @@ _TOOLS: list[Any] = [
     },
 ]
 
+_SUBMIT_TOOL = [t for t in _TOOLS if t["function"]["name"] == "submit_review"]
 _MAX_SNIPPET_LINES = 200
 MAX_STATIC_FINDINGS = 20
 _SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
@@ -170,11 +171,12 @@ class LLMClient:
             )
             prev_prompt_chars = prompt_chars
 
-            tool_choice: Any = (
-                {"type": "function", "function": {"name": "submit_review"}}
-                if force_submit
-                else "auto"
-            )
+            if force_submit:
+                tool_choice = "required"
+                tools = _SUBMIT_TOOL
+            else:
+                tool_choice = "auto"
+                tools = None
             force_submit = False
             try:
                 (
@@ -184,7 +186,7 @@ class LLMClient:
                     finish_reason,
                     elapsed,
                     usage,
-                ) = await self._stream_turn(messages, turn, tool_choice=tool_choice)
+                ) = await self._stream_turn(messages, turn, tool_choice=tool_choice, tools=tools)
             except (httpx.TimeoutException, APITimeoutError) as exc:
                 _log.warning(
                     "LLM stream timed out on turn %d/%d (model=%s): %s",
@@ -393,10 +395,13 @@ class LLMClient:
         messages: list[Any],
         turn: int,
         tool_choice: Any = "auto",
+        tools: list[Any] | None = None,
     ) -> tuple[
         str | None, str | None, list[dict[str, Any]], str | None, float, dict[str, int] | None
     ]:
-        """Stream one LLM turn; accumulate deltas and return (content, tool_calls, finish, elapsed).
+        """Stream one LLM turn.
+
+        Returns (content, reasoning, tool_calls, finish_reason, elapsed, usage).
 
         LLM_TIMEOUT acts as the read timeout — max wait between any two received chunks.
         This covers slow time-to-first-token on CPU-only backends as well as stalls mid-stream.
@@ -413,7 +418,7 @@ class LLMClient:
         async with await self._openai.chat.completions.create(
             model=self._model,
             messages=messages,
-            tools=_TOOLS,
+            tools=tools if tools is not None else _TOOLS,
             tool_choice=tool_choice,
             stream=True,
         ) as stream:
