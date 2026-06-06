@@ -7,7 +7,7 @@ RUN adduser --disabled-password --gecos "" appuser
 COPY pyproject.toml ./
 COPY pr_checker/ ./pr_checker/
 
-RUN pip install --no-cache-dir . && chown appuser /app
+RUN pip install --no-cache-dir . && chown -R appuser:appuser /app
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
